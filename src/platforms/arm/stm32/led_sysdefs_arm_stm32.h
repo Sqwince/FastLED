@@ -3,7 +3,8 @@
 
 #if defined(STM32F10X_MD) || defined(STM32F2XX)
 
-#include <application.h>
+//#include <application.h>
+
 #include <stdint.h>
 
 #include "fl/namespace.h"
@@ -33,6 +34,13 @@ FASTLED_USING_NAMESPACE
 #define cli() noInterrupts()
 #define sei() interrupts()
 
+#elif defined(STM32F407xx)
+// stm32duino
+
+#define cli() noInterrupts()
+#define sei() interrupts()
+
+
 #else
 #error "Platform not supported"
 #endif
@@ -55,7 +63,7 @@ FASTLED_USING_NAMESPACE
 // pgmspace definitions
 #define PROGMEM
 
-#if !defined(STM32F1)
+#if !defined(STM32F1) && !defined(STM32F407xx)
 // The stm32duino core already defines these
 #define pgm_read_dword(addr) (*(const unsigned long *)(addr))
 #define pgm_read_dword_near(addr) pgm_read_dword(addr)
@@ -78,6 +86,9 @@ typedef volatile       uint8_t RwReg; /**< Read-Write 8-bit register (volatile u
 // F_CPU is already defined on stm32duino, but it's not constant.
 #undef F_CPU
 #define F_CPU 72000000
+#elif defined(STM32F407xx)
+#undef F_CPU
+#define F_CPU 168000000
 #else
 #define F_CPU 72000000
 #endif
