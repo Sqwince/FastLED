@@ -15,7 +15,7 @@ FASTLED_NAMESPACE_BEGIN
 #define _RD32(T) struct __gen_struct_ ## T { static FASTLED_FORCE_INLINE gpio_reg_map* r() { return T->regs; } };
 #define _FL_IO(L,C) _RD32(GPIO ## L);  _FL_DEFINE_PORT3(L, C, _R(GPIO ## L));
 
-#elif defined(STM32F2XX)
+#elif defined(STM32F2XX) || defined(STM32F407xx)
 #define _RD32(T) struct __gen_struct_ ## T { static FASTLED_FORCE_INLINE volatile GPIO_TypeDef * r() { return T; } };
 #define _FL_IO(L,C) _RD32(GPIO ## L);
 
@@ -153,7 +153,7 @@ _FL_DEFPIN(4, 15, C);
 
 #define HAS_HARDWARE_PIN_SUPPORT
 
-#elif defined(ARDUINO_GENERIC_F103C8TX) // stm32duino generic STM32F103C8TX
+#elif defined(ARDUINO_GENERIC_F103C8TX) || defined(STM32F407xx) // stm32duino generic STM32F103C8TX
 #define MAX_PIN 36
 
 // PA0-PA15
