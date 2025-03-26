@@ -152,6 +152,73 @@ _DEFPIN_ARM(PB1, 1, B);
 
 #define HAS_HARDWARE_PIN_SUPPORT
 
+
+#elif defined(STM32F407xx)
+//intended for OpenFFBoard-main board that uses STM32F407VGT6 MCU
+// Only using one output for LED strip support for now. 
+//https://github.com/Ultrawipf/OpenFFBoard/wiki/
+
+//Register mapping
+#define _RD32_GPIO_MAP(T) struct __gen_struct_ ## T { static __attribute__((always_inline)) FASTLED_FORCE_INLINE volatile GPIO_TypeDef* r() { return T; } };
+#define _RD32 _RD32_GPIO_MAP
+#define _IO32(L) _RD32(GPIO ## L)
+
+_IO32(A); _IO32(B); _IO32(C); _IO32(D); _IO32(E);
+
+#define MAX_PIN PB1
+   _DEFPIN_ARM(PE2, 2, E); // DIN 8
+   _DEFPIN_ARM(PE3, 3, E); // DIN 7
+   _DEFPIN_ARM(PE4, 4, E); // DIN 6
+   _DEFPIN_ARM(PE5, 5, E); // DIN 5
+   _DEFPIN_ARM(PE6, 6, E); // DIN 4
+   _DEFPIN_ARM(PC13, 13, C); // DIN 3
+   _DEFPIN_ARM(PC14, 14, C); // DIN 2
+   _DEFPIN_ARM(PC15, 15, C); // DIN 1
+   //INSERT OTHERS HERE
+
+
+// _DEFPIN_ARM(PB11, 11, B);
+// _DEFPIN_ARM(PB10, 10, B);
+// _DEFPIN_ARM(PB2, 2, B);
+// _DEFPIN_ARM(PB0, 0, B);
+// _DEFPIN_ARM(PA7, 7, A);
+// _DEFPIN_ARM(PA6, 6, A);
+// _DEFPIN_ARM(PA5, 5, A);
+// _DEFPIN_ARM(PA4, 4, A);
+// _DEFPIN_ARM(PA3, 3, A);
+// _DEFPIN_ARM(PA2, 2, A);
+// _DEFPIN_ARM(PA1, 1, A);
+// _DEFPIN_ARM(PA0, 0, A);
+// _DEFPIN_ARM(PC15, 15, C);
+// _DEFPIN_ARM(PC14, 14, C);
+// _DEFPIN_ARM(PC13, 13, C);
+// _DEFPIN_ARM(PB7, 7, B);
+// _DEFPIN_ARM(PB6, 6, B);
+// _DEFPIN_ARM(PB5, 5, B);
+// _DEFPIN_ARM(PB4, 4, B);
+// _DEFPIN_ARM(PB3, 3, B);
+// _DEFPIN_ARM(PA15, 15, A);
+// _DEFPIN_ARM(PA14, 14, A);
+// _DEFPIN_ARM(PA13, 13, A);
+// _DEFPIN_ARM(PA12, 12, A);
+// _DEFPIN_ARM(PA11, 11, A);
+// _DEFPIN_ARM(PA10, 10, A);
+// _DEFPIN_ARM(PA9, 9, A);
+// _DEFPIN_ARM(PA8, 8, A);
+ _DEFPIN_ARM(PB15, 15, B);
+// _DEFPIN_ARM(PB14, 14, B);
+// _DEFPIN_ARM(PB13, 13, B);
+// _DEFPIN_ARM(PB12, 12, B);
+// _DEFPIN_ARM(PB8, 8, B);
+   _DEFPIN_ARM(PB1, 1, B);
+
+// SPI2 MOSI
+#define SPI_DATA PB15
+// SPI2 SCK
+#define SPI_CLOCK PB13
+
+#define HAS_HARDWARE_PIN_SUPPORT
+
 #else
 #error "Please define pin map for this board"
 
