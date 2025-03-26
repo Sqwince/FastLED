@@ -1,4 +1,4 @@
-name: uno
+name: due
 
 on:
   push:
@@ -12,4 +12,4 @@ jobs:
   build:
     uses: ./.github/workflows/build_template.yml
     with:
-      args: uno
+      args: due
