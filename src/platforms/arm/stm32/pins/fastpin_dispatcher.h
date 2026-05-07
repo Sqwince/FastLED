@@ -95,6 +95,12 @@
   #include "families/stm32f4.h"  // nolint
 
   // IWYU pragma: end_keep
+#elif defined(ARDUINO_OPENFFBOARD_F407VG)
+  #define FASTLED_STM32_BOARD_FILE "platforms/arm/stm32/pins/boards/f4/f407vg_OpenFFBoard.h"
+  // IWYU pragma: begin_keep
+  #include "families/stm32f4.h"  // nolint
+
+  // IWYU pragma: end_keep
 #elif defined(ARDUINO_NUCLEO_F446RE)
   #define FASTLED_STM32_BOARD_FILE "platforms/arm/stm32/pins/boards/f4/f446re_nucleo.h"
   // IWYU pragma: begin_keep
