@@ -15,7 +15,11 @@
 #include "fl/stl/noexcept.h"
 
 #include "cpixel_ledcontroller.h"
+#include "fl/channels/bus.h"
+#include "fl/channels/ichannel.h"
+#include "fl/channels/options.h"
 #include "fl/stl/shared_ptr.h"
+#include "fl/stl/string.h"
 #include "fl/stl/weak_ptr.h"
 #include "fl/stl/stdint.h"
 #include "fl/channels/config.h"
@@ -36,14 +40,21 @@ FASTLED_SHARED_PTR(ChannelData);
 ///        but with timing and pin information.
 ///
 /// Provides access to LED channel functionality for driving LED strips.
-/// RGB_ORDER is set to RGB - reordering is handled internally by the Channel
-class Channel: public CPixelLEDController<RGB> {
+/// RGB_ORDER is set to RGB - reordering is handled internally by the Channel.
+///
+/// Inherits `IChannel` so `ChannelEvents` callbacks (and other consumers that
+/// only need to identify a channel) can take a non-template reference even
+/// after `Channel<Bus, Chipset>` becomes templated in Phase 3b. See #2428.
+class Channel: public CPixelLEDController<RGB>, public IChannel {
 public:
-    /// @brief Create a new channel with optional affinity binding
-    /// @param config Channel configuration (includes optional affinity for driver selection)
+    /// @brief Create a new channel with optional `mBus` driver pinning.
+    /// @param config Channel configuration. If `config.options.mBus` is not
+    ///        `Bus::AUTO`, the channel pins itself to the driver named by
+    ///        `busName(mBus)` via `ChannelManager::findDriverByName()`. On a
+    ///        miss, `showPixels()` falls back to AUTO/priority dispatch and
+    ///        emits a one-shot `FL_ERROR` (see channel.cpp.hpp).
     /// @return Shared pointer to channel (auto-cleanup when out of scope)
-    /// @note Channels always use ChannelManager by default
-    /// @note If config.affinity is set, binds to the named driver from ChannelManager
+    /// @note Channels always use ChannelManager by default.
     static ChannelPtr create(const ChannelConfig& config);
 
     /// @brief Destructor
@@ -51,11 +62,11 @@ public:
 
     /// @brief Get the channel ID
     /// @return Channel ID (always increments, starts at 0)
-    i32 id() const { return mId; }
+    i32 id() const override { return mId; }
 
     /// @brief Get the channel name
     /// @return Channel name (user-specified or auto-generated "Channel_<id>")
-    const fl::string& name() const { return mName; }
+    const fl::string& name() const override { return mName; }
 
     /// @brief Get the pin number for this channel (data pin)
     /// @return Pin number
@@ -188,6 +199,23 @@ protected:
     /// @note Does not set LED data or channel options - caller must do that
     Channel(const ChipsetVariant& chipset, EOrder rgbOrder, RegistrationMode mode);
 
+    /// @brief Pre-bind a driver, bypassing `ChannelManager::selectDriverForChannel()`
+    ///        on every subsequent `showPixels()` call.
+    ///
+    /// Used by legacy `addLeds<>`-style controllers (e.g. `ClocklessIdf5`) to
+    /// route directly to a `BusTraits<DefaultBus>::instancePtr()` singleton at
+    /// construction time. Post-#2428 this is the mechanism that lets
+    /// `--gc-sections` drop unreferenced driver TUs from default builds
+    /// (Phase 5b — the binary-size fix for #2420 / #2421).
+    ///
+    /// @note Stored as `weak_ptr` to avoid holding the driver alive past the
+    ///       caller's intent. The caller (typically the static singleton in a
+    ///       BusTraits) owns the strong reference.
+    void setDriver(fl::shared_ptr<IChannelDriver> driver) FL_NOEXCEPT {
+        mDriver = driver;
+        mDriverPreBound = true;
+    }
+
 private:
     /// @brief Private constructor (use create() factory method)
     /// @param chipset Chipset configuration (clockless or SPI)
@@ -214,7 +242,19 @@ private:
     ChipsetVariant mChipset;         // Chipset configuration (clockless or SPI)
     EOrder mRgbOrder;
     fl::weak_ptr<IChannelDriver> mDriver;  // Weak reference to driver (prevents dangling pointers)
-    fl::string mAffinity;            // Engine affinity name (empty = no affinity, dynamic selection)
+    bool mDriverPreBound = false;    // True if setDriver() was called (legacy addLeds<> path).
+                                     // When true, showPixels() uses mDriver directly and skips
+                                     // ChannelManager::selectDriverForChannel(). When false (the
+                                     // default), every showPixels() re-evaluates the manager's
+                                     // priority list so users can swap drivers at runtime.
+    Bus mBus = Bus::AUTO;            // Typed driver selection (#2459). `Bus::AUTO` falls through
+                                     // to `ChannelManager` priority dispatch; any other value
+                                     // pins this channel to `busName(mBus)`.
+    bool mBusWarned = false;         // One-shot guard for the #2455 FL_ERROR. Flipped on the
+                                     // first showPixels() that observes a `mBus` miss (the
+                                     // named driver wasn't registered with ChannelManager).
+                                     // Subsequent shows on the same channel skip the warn even
+                                     // though the priority-dispatch fallback re-runs every frame.
     const i32 mId;
     fl::string mName;               // User-specified or auto-generated name
     ChannelOptions mSettings;           // Per-channel settings (gamma, rgbw, etc.)

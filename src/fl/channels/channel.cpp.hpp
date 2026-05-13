@@ -9,7 +9,7 @@
 #include "fl/channels/driver.h"
 #include "fl/channels/manager.h"
 #include "fl/stl/atomic.h"
-#include "fl/system/log.h"
+#include "fl/log/log.h"
 #include "fl/channels/options.h"
 #include "fl/gfx/pixel_iterator_any.h"
 #include "pixel_controller.h"
@@ -150,7 +150,7 @@ Channel::Channel(const ChipsetVariant& chipset, EOrder rgbOrder, RegistrationMod
     , mChipset(chipset)
     , mRgbOrder(rgbOrder)
     , mDriver()
-    , mAffinity()
+    , mBus(Bus::AUTO)
     , mId(nextId())
     , mName(makeName(mId)) {
     // NOTE: Do NOT call fl::pinMode() here — see comment in the
@@ -164,7 +164,7 @@ Channel::Channel(const ChipsetVariant& chipset, fl::span<CRGB> leds,
     , mChipset(chipset)
     , mRgbOrder(rgbOrder)
     , mDriver()  // Empty weak_ptr - late binding on first showPixels()
-    , mAffinity(options.mAffinity)  // Get affinity from ChannelOptions
+    , mBus(options.mBus)  // Bus selection (#2459)
     , mId(nextId())
     , mName(makeName(mId)) {
     // NOTE: Do NOT call fl::pinMode() here. The pin may already be
@@ -193,7 +193,7 @@ Channel::Channel(int pin, const ChipsetTimingConfig& timing, fl::span<CRGB> leds
     , mChipset(ClocklessChipset(pin, timing))  // Convert to variant
     , mRgbOrder(rgbOrder)
     , mDriver()  // Empty weak_ptr - late binding on first showPixels()
-    , mAffinity(options.mAffinity)  // Get affinity from ChannelOptions
+    , mBus(options.mBus)  // Bus selection (#2459)
     , mId(nextId())
     , mName(makeName(mId)) {
     // NOTE: Do NOT call fl::pinMode() here — see comment in the
@@ -313,8 +313,52 @@ void Channel::showPixels(PixelController<RGB, 1, 0xFFFFFFFF> &pixels) {
         FL_WARN("Channel '" << mName << "': Engine became READY after waiting");
     }
 
-    auto driver = ChannelManager::instance().selectDriverForChannel(mChannelData, mAffinity);
-    mDriver = driver;
+    // Phase 5b of #2428: if the driver was pre-bound via setDriver() (legacy
+    // addLeds<>-style controllers naming BusTraits<Bus::X>::instancePtr() in
+    // their constructor), bypass ChannelManager entirely. Channels created via
+    // the manager-based API (Channel::create(cfg) without affinity) keep their
+    // existing per-frame re-selection so users can swap drivers at runtime.
+    // Resolve dispatch via the typed `mBus` field (#2459). `Bus::AUTO`
+    // means "no pinning — let the manager pick by priority"; any other
+    // value pins this channel to `busName(mBus)`.
+    fl::string busKey;
+    if (mBus != Bus::AUTO) {
+        busKey = fl::string::from_literal(busName(mBus));
+    }
+    fl::shared_ptr<IChannelDriver> driver;
+    if (mDriverPreBound) {
+        driver = mDriver.lock();
+    } else {
+        driver = ChannelManager::instance().selectDriverForChannel(mChannelData, busKey);
+        mDriver = driver;
+    }
+    // #2455 / #2459: one-shot diagnostic when a typed-Bus miss happens.
+    // Probe via `findDriverByName` (silent) to distinguish "driver wasn't
+    // instantiated" from "driver exists but canHandle() rejected this
+    // chipset" — resolution paths differ. The mBusWarned guard suppresses
+    // duplicate logs on subsequent shows of the same channel.
+    if (!mDriverPreBound && mBus != Bus::AUTO && !mBusWarned &&
+        (!driver || driver->getName() != busKey)) {
+        auto busDriver = ChannelManager::instance().findDriverByName(busKey);
+        if (!busDriver) {
+            // Typed Bus miss — emit the actionable hint with the three
+            // currently-shipping remediations (option 3 added in #2460).
+            FL_ERROR("Channel '" << mName << "': Driver '" << busKey
+                << "' wasn't instantiated. Resolve with: "
+                << "(1) fl::enableDrivers<fl::Bus::" << busKey << ">() "
+                << "(links only this driver), "
+                << "(2) FastLED.enableAllDrivers() (links every driver), or "
+                << "(3) FastLED.addLeds<..., fl::Bus::" << busKey << ">(...) "
+                << "(legacy API; pins Bus + triggers linker keep-alive). "
+                << "Defaulting to AUTO/priority dispatch.");
+        } else {
+            // Registered, but canHandle() said no — bus/chipset mismatch.
+            FL_ERROR("Channel '" << mName << "': Driver '" << busKey
+                << "' is registered but cannot handle this channel's chipset "
+                << "(bus/chipset mismatch). Defaulting to AUTO/priority dispatch.");
+        }
+        mBusWarned = true;
+    }
     if (!driver) {
         FL_ERROR("Channel '" << mName << "': No compatible driver found - cannot transmit");
         return;
@@ -331,14 +375,14 @@ void Channel::showPixels(PixelController<RGB, 1, 0xFFFFFFFF> &pixels) {
     if (mChipset.is<ClocklessChipset>()) {
         // Clockless chipsets: dispatch based on encoder type
         const ClocklessChipset* clockless = mChipset.ptr<ClocklessChipset>();
-        switch (clockless->timing.encoder) {
+        switch (clockless->encoder) {
             case ClocklessEncoder::CLOCKLESS_ENCODER_WS2812:
                 pixelIterator.writeWS2812(&data);
                 break;
             case ClocklessEncoder::CLOCKLESS_ENCODER_UCS7604_8BIT:
             case ClocklessEncoder::CLOCKLESS_ENCODER_UCS7604_16BIT:
             case ClocklessEncoder::CLOCKLESS_ENCODER_UCS7604_16BIT_1600:
-                writeUCS7604(&data, pixelIterator, clockless->timing.encoder,
+                writeUCS7604(&data, pixelIterator, clockless->encoder,
                              mSettings, mRgbOrder);
                 break;
         }

@@ -6,21 +6,21 @@
 #if defined(FL_IS_RP2040) || defined(FL_IS_RP2350)
 
 #define FASTLED_INTERNAL
-#include "fl/fastled.h"
+#include "fl/system/fastled.h"
 
 #include "platforms/arm/rp/rpcommon/clockless_rp_pio_auto.h"
 #include "platforms/arm/rp/rpcommon/parallel_transpose.h"
 #include "fl/gfx/rectangular_draw_buffer.h"
 #include "fl/stl/singleton.h"
 #include "fl/stl/vector.h"
-#include "fl/system/log.h"
+#include "fl/log/log.h"
 #include "fl/math/math.h"
 #include "fl/stl/unique_ptr.h"
 #include "fl/stl/assert.h"
 #include "fl/stl/cstring.h"
 #include "fl/stl/allocator.h"
 #include "fl/stl/flat_map.h"
-#include "fl/system/log.h"
+#include "fl/log/log.h"
 
 // Hardware headers for RP2040/RP2350
 // IWYU pragma: begin_keep

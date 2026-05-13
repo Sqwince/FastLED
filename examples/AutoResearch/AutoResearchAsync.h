@@ -6,6 +6,7 @@
 #pragma once
 
 #include "AutoResearchRemote.h"
+#include "AutoResearchHelpers.h"  // autoResearchSetExclusiveDriverByName
 #include "fl/task/task.h"
 #include "fl/task/executor.h"
 
@@ -86,9 +87,20 @@ inline void maybeRegisterStubAutorun(
 
         for (fl::size di = 0; di < state->drivers_available.size(); di++) {
             const auto& drv = state->drivers_available[di];
+
+            // BIT_BANG is the cycle-counted GPIO fallback. On the stub/host
+            // platform there is no actual GPIO toggling, so its TX output
+            // can't be captured by the loopback RX path the stub uses for
+            // self-verification. Skip it in the stub autorun (#2469) — it's
+            // still available for explicit selection by name on real hardware.
+            if (drv.name == "BIT_BANG") {
+                FL_PRINT("\n[STUB CLIENT] Driver: " << drv.name.c_str() << "  (skipped — no loopback in host stub)");
+                continue;
+            }
+
             FL_PRINT("\n[STUB CLIENT] Driver: " << drv.name.c_str());
 
-            if (!FastLED.setExclusiveDriver(drv.name.c_str())) {
+            if (!autoResearchSetExclusiveDriverByName(drv.name.c_str())) {
                 FL_ERROR("[STUB CLIENT] Failed to activate driver: " << drv.name.c_str());
                 grand_total++;  // count as a failure
                 continue;

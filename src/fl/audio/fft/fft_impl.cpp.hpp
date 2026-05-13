@@ -2,7 +2,7 @@
 #define FASTLED_INTERNAL
 #endif
 
-#include "fl/fastled.h"
+#include "fl/system/fastled.h"
 
 // IWYU pragma: begin_keep
 #include "third_party/cq_kernel/cq_kernel.h"
@@ -20,7 +20,7 @@
 #include "fl/math/fixed_point.h"
 #include "fl/stl/vector.h"
 #include "fl/math/alpha.h"
-#include "fl/system/log.h"
+#include "fl/log/log.h"
 
 #include "fl/stl/cstring.h"
 #include "fl/stl/singleton.h"

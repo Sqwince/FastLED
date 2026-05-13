@@ -10,11 +10,13 @@
 #include "eorder.h"
 #include "fl/stl/compiler_control.h"
 #include "fl/chipsets/timing_traits.h"
+#include "fl/channels/bus.h"
 #include "fl/channels/data.h"
 #include "fl/channels/driver.h"
 #include "fl/channels/manager.h"
 #include "pixel_iterator.h"
-#include "fl/system/log.h"
+#include "fl/log/log.h"
+#include "platforms/stub/bus_traits.h"
 #include "fl/stl/noexcept.h"
 
 namespace fl {
@@ -82,7 +84,11 @@ protected:
     }
 
     static fl::shared_ptr<IChannelDriver> getStubSpiEngine() FL_NOEXCEPT {
-        return ChannelManager::instance().getDriverByName("SPI");
+        // Phase 5c of #2428: bypass `ChannelManager` and bind directly to
+        // the `BusTraits<Bus::STUB>` singleton. Stub builds route every
+        // clockless/SPI chipset through the same no-op driver. Naming the
+        // singleton here ODR-links the stub driver TU.
+        return BusTraits<Bus::STUB>::instancePtr();
     }
 };
 

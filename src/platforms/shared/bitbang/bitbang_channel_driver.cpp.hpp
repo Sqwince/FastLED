@@ -5,7 +5,7 @@
 
 #include "platforms/shared/bitbang/bitbang_channel_driver.h"
 #include "fl/system/delay.h"
-#include "fl/system/log.h"
+#include "fl/log/log.h"
 #include "fl/system/pin.h"
 #include "fl/stl/algorithm.h"
 #include "platforms/avr/is_avr.h"
@@ -40,7 +40,8 @@ IChannelDriver::DriverState BitBangChannelDriver::poll() FL_NOEXCEPT {
 }
 
 fl::string BitBangChannelDriver::getName() const FL_NOEXCEPT {
-    return fl::string::from_literal("BITBANG");
+    // Matches the `fl::Bus::BIT_BANG` enumerator spelling.
+    return fl::string::from_literal("BIT_BANG");
 }
 
 IChannelDriver::Capabilities BitBangChannelDriver::getCapabilities() const FL_NOEXCEPT {

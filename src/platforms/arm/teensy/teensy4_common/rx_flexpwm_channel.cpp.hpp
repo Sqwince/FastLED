@@ -25,11 +25,11 @@
 #if defined(FL_IS_TEENSY_4X)
 
 #define FASTLED_INTERNAL
-#include "fl/fastled.h"
+#include "fl/system/fastled.h"
 #include "platforms/arm/teensy/teensy4_common/rx_flexpwm_channel.h"
 
 #include "fl/stl/vector.h"
-#include "fl/system/log.h"
+#include "fl/log/log.h"
 #include "fl/stl/result.h"
 #include "fl/stl/cstring.h"
 

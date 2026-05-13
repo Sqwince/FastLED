@@ -15,7 +15,7 @@
 #include "fl/chipsets/chipset_timing_config.h"
 #include "fl/fx/1d/perlin_particle_punch.h"
 #include "fl/fx/fx_engine.h"
-#include "fl/ui.h"
+#include "fl/ui/ui.h"
 
 
 // ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ fl::ScreenMap screenMap =
 // ---------------------------------------------------------------------------
 void setup() {
     Serial.begin(115200);
-    //FastLED.setExclusiveDriver("SPI");
+    //FastLED.setExclusiveDriver(fl::Bus::SPI);
     fl::ChannelOptions opts;
     opts.mCorrection = TypicalLEDStrip;
     auto timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();

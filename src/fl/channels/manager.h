@@ -24,6 +24,8 @@
 
 #include "fl/channels/driver.h"
 #include "fl/channels/data.h"
+#include "fl/channels/bus.h"
+#include "fl/channels/bus_traits.h"
 #include "fl/system/engine_events.h"
 #include "fl/stl/vector.h"
 #include "fl/stl/shared_ptr.h"
@@ -92,16 +94,58 @@ public:
     /// @note If name is not found, this is a no-op (does not warn)
     void setDriverEnabled(const char* name, bool enabled) FL_NOEXCEPT;
 
-    /// @brief Enable only one driver exclusively (disables all others)
-    /// @param name Driver name to enable exclusively (case-sensitive, e.g., "RMT", "SPI", "PARLIO")
+    /// @brief Register a single driver at a priority above the platform default
+    ///        and disable all others (compile-time TU-linking variant).
+    ///
+    /// Post-#2428 the default build does NOT auto-register every driver --
+    /// only the platform-default driver TU links (via the legacy clockless
+    /// controller's Phase 5b pre-bind). This template provides the opt-in
+    /// path to add another driver and have it win priority dispatch.
+    ///
+    /// Naming `BusTraits<B>::instancePtr()` here is the ODR-use that links
+    /// the driver TU; the registration with the manager happens at
+    /// `kExclusivePriority` (a value above any platform default) so the
+    /// new driver wins in `selectDriverForChannel()`.
+    ///
+    /// @tparam B  Bus identifier (must have a `BusTraits<B>` specialization
+    ///            visible at the call site).
+    /// @note **Must be called before `addLeds<>` / `FastLED.add()`** so
+    ///       newly-constructed channels see the override during driver
+    ///       resolution. Legacy clockless controllers that already pre-bound
+    ///       to the platform default via Phase 5b will continue to use that
+    ///       pre-bind -- this template does not rewrite existing controllers.
+    template<fl::Bus B>
+    void setExclusiveDriver() FL_NOEXCEPT;
+
+    /// @brief Enable only one driver exclusively, by `fl::Bus` enum (runtime form).
+    /// @param bus Bus enum identifying the driver to enable (typed, typo-safe)
+    /// @return true if driver was found and set as exclusive, false otherwise
+    /// @note Typed overload — prefer this over the by-name variant for
+    ///       built-in drivers. Delegates to `setExclusiveDriverByName(busName(bus))`.
+    /// @note Does NOT ODR-use `BusTraits<bus>::instancePtr()` — for compile-time
+    ///       TU-linking, use the `setExclusiveDriver<fl::Bus B>()` template overload.
+    bool setExclusiveDriver(Bus bus) FL_NOEXCEPT;
+
+    /// @brief Enable only one driver exclusively (disables all others) — by-name escape hatch
+    /// @param name Driver name to enable exclusively (case-sensitive, e.g., "MOCK_SPI")
     /// @return true if driver was found and set as exclusive, false if name not found
+    ///
+    /// Test / mock helper: works with drivers that have ALREADY been registered
+    /// via `addDriver()` (typically `ChannelEngineMock` instances under unit tests),
+    /// or for drivers whose names are NOT in the `fl::Bus` enum (custom
+    /// third-party drivers, RPC-resolved names). Does NOT link or register new
+    /// drivers.
+    ///
+    /// For built-in drivers, prefer either:
+    ///   - `setExclusiveDriver(fl::Bus)` (typed runtime form), or
+    ///   - `setExclusiveDriver<fl::Bus B>()` (compile-time form that links the
+    ///     driver TU via ODR-use).
     /// @note Atomically disables all drivers, then enables the specified one
     /// @note Changes take effect immediately on next enqueue()
     /// @note If name is not found, all drivers remain disabled (defensive behavior)
     /// @note Use nullptr or empty string to disable all drivers (returns false)
     /// @warning This will disable ALL other registered drivers, including future additions
-    /// @warning This ensures forward compatibility - new drivers are automatically excluded
-    bool setExclusiveDriver(const char* name) FL_NOEXCEPT;
+    bool setExclusiveDriverByName(const char* name) FL_NOEXCEPT;
 
     /// @brief Change the priority of a registered driver
     /// @param name Driver name (case-sensitive, e.g., "RMT", "SPI", "PARLIO")
@@ -132,7 +176,16 @@ public:
     /// @param name Engine name to look up (case-sensitive, e.g., "RMT", "SPI", "PARLIO")
     /// @return Shared pointer to driver if found and enabled, nullptr otherwise
     /// @note Used by Channel affinity system to bind channels to specific drivers
+    /// @note Logs `FL_ERROR` on miss — call `findDriverByName()` for silent lookup.
     fl::shared_ptr<IChannelDriver> getDriverByName(const fl::string& name) const FL_NOEXCEPT;
+
+    /// @brief Silent counterpart to `getDriverByName()`.
+    ///
+    /// Same lookup, no logging on miss. Lets callers that handle the "missing
+    /// driver" case themselves (e.g. `Channel::showPixels()`'s one-shot
+    /// affinity-miss diagnostic from #2455) probe the registry without
+    /// triggering the per-frame `FL_ERROR` stream that `getDriverByName()` emits.
+    fl::shared_ptr<IChannelDriver> findDriverByName(const fl::string& name) const FL_NOEXCEPT;
 
     /// @brief Select best driver for channel data (used by Channel::showPixels)
     /// @param data Channel data to route (chipset configuration)
@@ -206,7 +259,8 @@ private:
     mutable fl::vector<DriverInfo> mCachedDriverInfo;
 
     /// @brief Exclusive driver name (empty if no exclusive mode)
-    /// @note When non-empty, new drivers are auto-disabled if name doesn't match
+    /// @note When non-empty, new drivers are auto-disabled if name doesn't match.
+    ///       Set by `setExclusiveDriverByName()` / cleared on empty name.
     fl::string mExclusiveDriver;
 
     // Non-copyable, non-movable
@@ -219,7 +273,19 @@ private:
 /// @brief Get the global ChannelManager singleton instance
 /// @return Reference to the singleton ChannelManager
 /// @note Available on all platforms (has 0 drivers on non-ESP32)
-/// @note On ESP32, platform code registers drivers during static initialization
 ChannelManager& channelManager() FL_NOEXCEPT;
+
+// Inline template definition for ChannelManager::setExclusiveDriver<B>().
+// Defined here so the ODR-use of `BusTraits<B>::instancePtr()` happens in the
+// caller's TU, which links the driver translation unit. The caller must have
+// the per-driver `bus_traits.h` (which provides `BusTraits<B>::instancePtr`)
+// visible at the call site.
+template<fl::Bus B>
+inline void ChannelManager::setExclusiveDriver() FL_NOEXCEPT {
+    // Priority above any platform default — see `bus_priorities.h` for the
+    // default-priority constants (highest there is ~10 for native LCD/I2S SPI).
+    constexpr int kExclusivePriority = 10000;
+    addDriver(kExclusivePriority, fl::BusTraits<B>::instancePtr());
+}
 
 } // namespace fl

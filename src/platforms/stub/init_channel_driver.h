@@ -11,28 +11,20 @@
 #include "fl/channels/manager.h"
 #include "fl/channels/channel.h"
 #include "fl/stl/shared_ptr.h"
+#include "platforms/stub/bus_traits.h"
 #include "platforms/stub/clockless_channel_engine_stub.h"
 #include "fl/stl/noexcept.h"
 
 namespace fl {
 namespace platforms {
 
-/// @brief Initialize channel drivers for stub platform
+/// @brief Initialize channel drivers for stub platform (no-op).
 ///
-/// Registers ClocklessChannelEngineStub with the ChannelManager so that
-/// the FastLED.add() API (Channel objects) drives stub GPIO simulation and
-/// fires SimEdgeObserver callbacks that NativeRxDevice uses for validation.
+/// Post-#2428 the stub platform does not auto-register any driver with
+/// `ChannelManager`. Tests that need the stub driver call
+/// `fl::enableDrivers<Bus::STUB>()` or `FastLED.enableAllDrivers()` directly.
 inline void initChannelDrivers() FL_NOEXCEPT {
-    fl::ChannelManager& manager = fl::ChannelManager::instance();
-
-    // Register the stub clockless driver with priority 1.
-    // Priority 1 > 0 (the no-op StubChannelDriver registered elsewhere),
-    // so this driver is preferred for clockless channels on the stub platform.
-    static fl::stub::ClocklessChannelEngineStub stubEngine;  // ok static in header
-    // Cast to base so make_shared_no_tracking creates shared_ptr<IChannelDriver>
-    fl::IChannelDriver& driverRef = stubEngine;
-    auto sharedDriver = fl::make_shared_no_tracking(driverRef);
-    manager.addDriver(1, sharedDriver);
+    // No auto-registration. See `fl::enableDrivers<Bus::STUB>()` for opt-in.
 }
 
 }  // namespace platforms

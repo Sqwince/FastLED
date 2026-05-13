@@ -1,14 +1,37 @@
 // IWYU pragma: private
 
+/// @file js_fetch.cpp.hpp
+/// @brief WASM HTTP fetch shim — async dispatch + thread-safe callback table.
+///
+/// Threading model (pthread back-end, `-pthread` + `-sPROXY_TO_PTHREAD`):
+///
+///   1. Multiple sketch coroutines (each on its own pthread) can call
+///      `WasmFetchRequest::response()` concurrently. `mNextRequestId` and
+///      `mPendingCallbacks` are protected by `mCallbacksMutex` — uncontended
+///      access uses Atomics fast paths; contention is rare (callback
+///      handoffs are O(microseconds)).
+///   2. `js_fetch_async` is an `addToLibrary` import. With `-pthread`,
+///      Emscripten auto-proxies non-thread-safe JS-library calls to the
+///      browser main thread for execution, so the actual `fetch()` runs
+///      where Web APIs require it.
+///   3. The success/error callbacks are exported WASM functions invoked
+///      from JS. They lock the same callback-map mutex briefly. After
+///      committing Promise state via the user callback, they invoke
+///      `ICoroutineRuntime::instance().wakeWaiters()` to unpark any
+///      pthread blocked in `fl::platforms::await()`.
+///
+/// See issue #2452 for the JSPI -> pthread migration history.
+
 #include "platforms/wasm/js_fetch.h"
 #include "fl/net/http/fetch.h"  // Include for fl::net::http::Response definition
-#include "fl/system/log.h"
+#include "fl/log/log.h"
 #include "fl/stl/string.h"
 #include "fl/stl/function.h"
 #include "fl/stl/flat_map.h"
 #include "fl/stl/mutex.h"
 #include "fl/stl/singleton.h"
 #include "fl/stl/optional.h"
+#include "platforms/coroutine_runtime.h"
 
 #include "platforms/wasm/is_wasm.h"
 #ifdef FL_IS_WASM
@@ -80,11 +103,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void js_fetch_success_callback(u32 request_id, c
         fl::net::http::Response response(200, "OK");
         response.set_body(fl::string(content));
         response.set_header("content-type", "text/html"); // Default content type
-        
+
         (*callback_opt)(response);
     } else {
         FL_WARN("Warning: No pending callback found for fetch success request " << request_id);
     }
+    // Wake any pthread parked inside fl::platforms::await().
+    fl::platforms::ICoroutineRuntime::instance().wakeWaiters();
 }
 
 // C++ error callback function that JavaScript can call when fetch fails
@@ -98,11 +123,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void js_fetch_error_callback(u32 request_id, con
         fl::string error_content = "Fetch Error: ";
         error_content += error_message;
         response.set_body(error_content);
-        
+
         (*callback_opt)(response);
     } else {
         FL_WARN("Warning: No pending callback found for fetch error request " << request_id);
     }
+    // See note in js_fetch_success_callback above.
+    fl::platforms::ICoroutineRuntime::instance().wakeWaiters();
 }
 
 void WasmFetchRequest::response(const FetchResponseCallback& callback) {

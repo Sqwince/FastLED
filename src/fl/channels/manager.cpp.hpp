@@ -3,9 +3,9 @@
 
 #include "fl/channels/manager.h"
 #include "fl/stl/singleton.h"
-#include "fl/system/log.h"
-#include "fl/system/log.h"
-#include "fl/system/log.h"
+#include "fl/log/log.h"
+#include "fl/log/log.h"
+#include "fl/log/log.h"
 #include "fl/system/engine_events.h"
 #include "fl/stl/chrono.h"
 #include "fl/stl/algorithm.h"
@@ -170,23 +170,26 @@ void ChannelManager::setDriverEnabled(const char* name, bool enabled) {
     }
 }
 
-bool ChannelManager::setExclusiveDriver(const char* name) {
-    // Handle null or empty name
+bool ChannelManager::setExclusiveDriver(Bus bus) {
+    return setExclusiveDriverByName(busName(bus));
+}
+
+bool ChannelManager::setExclusiveDriverByName(const char* name) {
+    // Handle null or empty name: disable everything.
     if (!name || !name[0]) {
-        FL_ERROR("ChannelManager::setExclusiveDriver() - Null or empty driver name provided");
+        FL_ERROR("ChannelManager::setExclusiveDriverByName() - Null or empty driver name provided");
         mExclusiveDriver.clear();
-        // Disable all drivers
         for (auto& entry : mDrivers) {
             entry.enabled = false;
         }
         return false;
     }
 
-    // Store exclusive driver name for forward compatibility
-    // When non-empty, addDriver() will auto-disable non-matching drivers
+    // Store exclusive driver name for forward compatibility.
+    // When non-empty, addDriver() will auto-disable non-matching drivers.
     mExclusiveDriver = name;
 
-    // Single-pass: enable only drivers matching the given name
+    // Single-pass: enable only drivers matching the given name.
     bool found = false;
     for (auto& entry : mDrivers) {
         entry.enabled = (entry.name == name);
@@ -194,9 +197,8 @@ bool ChannelManager::setExclusiveDriver(const char* name) {
     }
 
     if (!found) {
-        FL_ERROR("ChannelManager::setExclusiveDriver() - Driver '" << name << "' not found in registry");
+        FL_ERROR("ChannelManager::setExclusiveDriverByName() - Driver '" << name << "' not found in registry");
     }
-
     return found;
 }
 
@@ -266,20 +268,28 @@ fl::span<const DriverInfo> ChannelManager::getDriverInfos() const {
     return mCachedDriverInfo;
 }
 
+fl::shared_ptr<IChannelDriver> ChannelManager::findDriverByName(const fl::string& name) const {
+    if (name.empty()) {
+        return fl::shared_ptr<IChannelDriver>();
+    }
+    for (const auto& entry : mDrivers) {
+        if (entry.enabled && entry.name == name) {
+            return entry.driver;
+        }
+    }
+    return fl::shared_ptr<IChannelDriver>();
+}
+
 fl::shared_ptr<IChannelDriver> ChannelManager::getDriverByName(const fl::string& name) const {
     if (name.empty()) {
         FL_ERROR("ChannelManager::getDriverByName() - Empty driver name provided");
         return fl::shared_ptr<IChannelDriver>();
     }
-
-    for (const auto& entry : mDrivers) {
-        if (entry.enabled && entry.name == name) {
-            return entry.driver;  // Return shared_ptr directly
-        }
+    auto driver = findDriverByName(name);
+    if (!driver) {
+        FL_ERROR("ChannelManager::getDriverByName() - Driver '" << name.c_str() << "' not found or not enabled");
     }
-
-    FL_ERROR("ChannelManager::getDriverByName() - Driver '" << name.c_str() << "' not found or not enabled");
-    return fl::shared_ptr<IChannelDriver>();
+    return driver;
 }
 
 fl::shared_ptr<IChannelDriver> ChannelManager::selectDriverForChannel(const ChannelDataPtr& data, const fl::string& affinity) {
@@ -288,18 +298,24 @@ fl::shared_ptr<IChannelDriver> ChannelManager::selectDriverForChannel(const Chan
         return fl::shared_ptr<IChannelDriver>();
     }
 
-    // If affinity is specified, look up by name    
+    // If affinity is specified, look up by name. Misses fall through to
+    // priority dispatch below — per-frame logging is intentionally silent
+    // here because `Channel::showPixels` now emits a one-shot, actionable
+    // FL_ERROR with the enableDrivers<...>() / enableAllDrivers() hint
+    // (#2455). Use `findDriverByName` (silent) rather than `getDriverByName`
+    // (logs on miss) so the silent fall-through actually IS silent.
     do {
         if (affinity.empty()) {
             break;
         }
-        auto driver = getDriverByName(affinity);
+        auto driver = findDriverByName(affinity);
         if (!driver) {
-            FL_ERROR("ChannelManager: Affinity driver '" << affinity << "' not found");
-            break;
+            break;  // diagnostic emitted at the channel layer
         }
         if (!driver->canHandle(data)) {
-            FL_ERROR("ChannelManager: Affinity driver '" << affinity << "' cannot handle channel data");
+            FL_WARN_ONCE("ChannelManager: Affinity driver '" << affinity
+                         << "' cannot handle channel data (chipset/bus mismatch). "
+                         << "Falling back to AUTO/priority dispatch.");
             break;
         }
         return driver;

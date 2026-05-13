@@ -285,8 +285,8 @@ fl::json AutoResearchRemoteControl::runSingleTestImpl(const fl::json& args) {
 
     uint32_t start_ms = millis();
 
-    // Set driver as exclusive
-    if (!FastLED.setExclusiveDriver(driver_name.c_str())) {
+    // Set driver as exclusive (by-name path: driver_name comes from RPC)
+    if (!autoResearchSetExclusiveDriverByName(driver_name.c_str())) {
         response.set("success", false);
         response.set("error", "DriverSetupFailed");
         fl::sstream msg;
@@ -300,15 +300,19 @@ fl::json AutoResearchRemoteControl::runSingleTestImpl(const fl::json& args) {
     // Channel API: Uses timing_name from RPC (default: WS2812B-V5)
     // RX decode timing MUST match actual TX timing for correct capture
     fl::ChipsetTimingConfig resolved_timing;
+    fl::ClocklessEncoder resolved_encoder = fl::ClocklessEncoder::CLOCKLESS_ENCODER_WS2812;
     if (use_legacy_api) {
         resolved_timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
+        resolved_encoder = fl::encoder_for<fl::TIMING_WS2812_800KHZ>();
         timing_name = "WS2812-800KHZ";
     } else if (timing_name == "UCS7604-800KHZ") {
         resolved_timing = fl::makeTimingConfig<fl::TIMING_UCS7604_800KHZ>();
+        resolved_encoder = fl::encoder_for<fl::TIMING_UCS7604_800KHZ>();
     } else {
         resolved_timing = fl::makeTimingConfig<fl::TIMING_WS2812B_V5>();
+        resolved_encoder = fl::encoder_for<fl::TIMING_WS2812B_V5>();
     }
-    fl::NamedTimingConfig timing_config(resolved_timing, timing_name.c_str());
+    fl::NamedTimingConfig timing_config(resolved_timing, timing_name.c_str(), resolved_encoder);
 
     // Dynamically allocate LED arrays for each lane
     fl::vector<fl::unique_ptr<fl::vector<CRGB>>> led_arrays;
@@ -370,7 +374,8 @@ fl::json AutoResearchRemoteControl::runSingleTestImpl(const fl::json& args) {
         rx_channel_to_use,
         mState->rx_buffer,
         lane_sizes[0],  // base_strip_size (used for logging)
-        fl::RxDeviceType::RMT  // Default RX device type
+        fl::RxDeviceType::RMT,  // Default RX device type
+        timing_config.encoder
     );
 
     // Run test with debug output suppressed
@@ -526,12 +531,15 @@ fl::json AutoResearchRemoteControl::runParallelTestImpl(const fl::json& args) {
 
     // Get timing configuration
     fl::ChipsetTimingConfig resolved_timing;
+    fl::ClocklessEncoder resolved_encoder = fl::ClocklessEncoder::CLOCKLESS_ENCODER_WS2812;
     if (timing_name == "UCS7604-800KHZ") {
         resolved_timing = fl::makeTimingConfig<fl::TIMING_UCS7604_800KHZ>();
+        resolved_encoder = fl::encoder_for<fl::TIMING_UCS7604_800KHZ>();
     } else {
         resolved_timing = fl::makeTimingConfig<fl::TIMING_WS2812B_V5>();
+        resolved_encoder = fl::encoder_for<fl::TIMING_WS2812B_V5>();
     }
-    fl::NamedTimingConfig timing_config(resolved_timing, timing_name.c_str());
+    fl::NamedTimingConfig timing_config(resolved_timing, timing_name.c_str(), resolved_encoder);
 
     // 3. Parse each driver entry and validate
     struct DriverEntry {
@@ -646,9 +654,27 @@ fl::json AutoResearchRemoteControl::runParallelTestImpl(const fl::json& args) {
         for (fl::size li = 0; li < de.lane_sizes.size(); li++) {
             auto leds = fl::make_unique<fl::vector<CRGB>>(de.lane_sizes[li]);
 
-            // Set up channel with driver affinity
+            // Set up channel with typed driver selection (#2459).
+            // The pre-#2459 string `mAffinity` field is gone — translate the
+            // discovered driver name back to a `fl::Bus` enum value.
             fl::ChannelOptions opts;
-            opts.mAffinity = de.name;
+            {
+                const fl::string& n = de.name;
+                if      (n == "RMT")           opts.mBus = fl::Bus::RMT;
+                else if (n == "PARLIO")        opts.mBus = fl::Bus::PARLIO;
+                else if (n == "SPI")           opts.mBus = fl::Bus::SPI;
+                else if (n == "I2S")           opts.mBus = fl::Bus::I2S;
+                else if (n == "I2S_SPI")       opts.mBus = fl::Bus::I2S_SPI;
+                else if (n == "LCD_RGB")       opts.mBus = fl::Bus::LCD_RGB;
+                else if (n == "LCD_SPI")       opts.mBus = fl::Bus::LCD_SPI;
+                else if (n == "LCD_CLOCKLESS") opts.mBus = fl::Bus::LCD_CLOCKLESS;
+                else if (n == "UART")          opts.mBus = fl::Bus::UART;
+                else if (n == "FLEX_IO")       opts.mBus = fl::Bus::FLEX_IO;
+                else if (n == "OBJECT_FLED")   opts.mBus = fl::Bus::OBJECT_FLED;
+                else if (n == "BIT_BANG")      opts.mBus = fl::Bus::BIT_BANG;
+                else if (n == "STUB")          opts.mBus = fl::Bus::STUB;
+                // else: leave Bus::AUTO; priority dispatch will pick.
+            }
 
             fl::ChannelConfig channel_config(
                 de.pin_tx + (int)li,  // Consecutive pins per lane
@@ -737,7 +763,8 @@ fl::json AutoResearchRemoteControl::runParallelTestImpl(const fl::json& args) {
                 mState->rx_channel,
                 mState->rx_buffer,
                 primary_driver.lane_sizes[0],
-                fl::RxDeviceType::RMT
+                fl::RxDeviceType::RMT,
+                timing_config.encoder
             );
 
             int total_tests = 0;
@@ -1661,9 +1688,9 @@ void AutoResearchRemoteControl::registerFunctions(fl::shared_ptr<AutoResearchSta
             }
         }
 
-        // Set exclusive driver if requested
+        // Set exclusive driver if requested (by-name path: requested_driver from RPC)
         if (!requested_driver.empty()) {
-            if (!FastLED.setExclusiveDriver(requested_driver.c_str())) {
+            if (!autoResearchSetExclusiveDriverByName(requested_driver.c_str())) {
                 response.set("success", false);
                 response.set("error", "DriverSetupFailed");
                 fl::sstream msg;

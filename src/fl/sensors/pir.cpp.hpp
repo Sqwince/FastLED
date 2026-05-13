@@ -2,11 +2,11 @@
 #define FASTLED_INTERNAL
 #endif
     
-#include "fl/fastled.h"
+#include "fl/system/fastled.h"
 
 #include "fl/system/fastpin.h"
 #include "fl/stl/strstream.h"
-#include "fl/system/log.h"
+#include "fl/log/log.h"
 #include "fl/stl/assert.h"
 #include "fl/sensors/pir.h"
 

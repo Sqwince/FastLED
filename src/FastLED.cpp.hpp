@@ -5,6 +5,7 @@
 #include "FastLED.h"
 #include "fl/system/engine_events.h"
 #include "fl/stl/compiler_control.h"
+#include "fl/channels/all_drivers.h"
 #include "fl/channels/channel.h"
 #include "fl/channels/channel_events.h"
 #include "fl/channels/manager.h"
@@ -15,7 +16,7 @@
 #if SKETCH_HAS_LARGE_MEMORY
 #include "fl/task/executor.h"  // for task::run (WiFi yield in show() spin loop)
 #endif
-#include "fl/system/log.h"  // for FL_WARN
+#include "fl/log/log.h"  // for FL_WARN
 #include "fl/stl/assert.h"  // for FL_ASSERT
 #include "fl/audio/audio_manager.h"  // for AudioManager
 #include "hsv2rgb.h"  // for CRGB
@@ -556,9 +557,9 @@ void CFastLED::setDriverEnabled(const char* name, bool enabled) {
 	manager.setDriverEnabled(name, enabled);
 }
 
-bool CFastLED::setExclusiveDriver(const char* name) {
+bool CFastLED::setExclusiveDriver(fl::Bus bus) {
 	fl::ChannelManager& manager = fl::channelManager();
-	return manager.setExclusiveDriver(name);
+	return manager.setExclusiveDriver(bus);
 }
 
 bool CFastLED::isDriverEnabled(const char* name) const {
@@ -597,6 +598,29 @@ bool CFastLED::wait(fl::u32 timeout_ms) {
 // ============================================================================
 
 fl::ChannelPtr CFastLED::add(const fl::ChannelConfig& config) {
+    // Issue #2459: the non-template `FastLED.add(cfg)` path is the runtime-
+    // selection mode. To make sure `cfg.options.mBus` (or priority dispatch
+    // when `mBus == Bus::AUTO`) can actually find the requested driver at
+    // runtime, we eagerly enroll every driver available on this platform.
+    // That trades binary size for ergonomics — the user wanted runtime
+    // selection, so they get runtime selection.
+    //
+    // For minimum binary size, callers should use the compile-time path:
+    //   FastLED.addLeds<CHIPSET, PIN, ORDER, fl::Bus::X>(leds, n);
+    // which ODR-uses only `BusTraits<X>::instancePtr()` and lets
+    // `--gc-sections` drop every other driver TU.
+    //
+    // The warning fires at most once per process (FL_WARN_ONCE) and can be
+    // disabled with `-DFASTLED_SUPPRESS_RUNTIME_DRIVER_WARNING`.
+    #ifndef FASTLED_SUPPRESS_RUNTIME_DRIVER_WARNING
+    FL_WARN_ONCE("FastLED.add(cfg): runtime-selection mode — enrolling every "
+                 "available driver via fl::enableAllDrivers(). For minimum "
+                 "binary size, prefer FastLED.addLeds<CHIPSET, PIN, ORDER, "
+                 "fl::Bus::X>(leds, n) which links only the named driver. "
+                 "Suppress this warning with -DFASTLED_SUPPRESS_RUNTIME_DRIVER_WARNING.");
+    #endif
+    fl::enableAllDrivers();
+
     fl::ChannelManager& manager = fl::channelManager();
     FL_ASSERT(manager.getDriverCount() > 0,
               "No channel drivers available - channel API requires at least one registered driver");

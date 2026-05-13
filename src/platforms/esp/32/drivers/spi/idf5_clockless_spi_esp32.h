@@ -14,13 +14,15 @@
 #include "crgb.h"
 #include "eorder.h"
 #include "pixel_iterator.h"
+#include "fl/channels/bus.h"
 #include "fl/channels/data.h"
 #include "fl/channels/driver.h"
 #include "fl/channels/manager.h"
 #include "fl/chipsets/timing_traits.h"
-#include "fl/system/log.h"
+#include "fl/log/log.h"
 #include "fl/stl/noexcept.h"
 #include "fl/stl/static_assert.h"
+#include "platforms/esp/32/drivers/spi/bus_traits.h"
 
 namespace fl {
 template <int DATA_PIN, typename TIMING, EOrder RGB_ORDER = RGB, int XTRA0 = 0, bool FLIP = false, int WAIT_TIME = 5>
@@ -81,7 +83,12 @@ protected:
     }
 
     static fl::shared_ptr<IChannelDriver> getClocklessSpiEngine() FL_NOEXCEPT {
-        return ChannelManager::instance().getDriverByName("SPI");
+        // Phase 5c of #2428: bypass `ChannelManager` and bind directly to
+        // the `BusTraits<Bus::SPI>` singleton. Naming
+        // `BusTraits<Bus::SPI>::instancePtr()` here is the ODR-use that
+        // lets the linker keep ONLY the SPI clockless driver TU -- post-#2428
+        // the ChannelManager-driven registry path is gone.
+        return BusTraits<Bus::SPI>::instancePtr();
     }
 };
 }  // namespace fl

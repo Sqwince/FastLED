@@ -2,9 +2,9 @@
 // Tests that UIAudio with a URL properly serializes the URL field
 // in the JSON UI output on the stub platform.
 
-#include "fl/ui.h"
+#include "fl/ui/ui.h"
 #include "fl/stl/json.h"
-#include "fl/system/log.h"
+#include "fl/log/log.h"
 #include "fl/stl/url.h"
 #include "platforms/shared/ui/json/ui.h"
 #include "platforms/shared/ui/json/audio.h"

@@ -20,6 +20,7 @@ import argparse
 import sys
 import tomllib
 from pathlib import Path
+from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -28,7 +29,7 @@ BUILD_FLAGS_TOML = (
 )
 
 
-def _load_toml() -> dict:
+def _load_toml() -> dict[str, Any]:
     """Load and return the parsed build_flags.toml."""
     if not BUILD_FLAGS_TOML.exists():
         raise FileNotFoundError(f"Build flags TOML not found: {BUILD_FLAGS_TOML}")

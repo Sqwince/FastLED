@@ -53,7 +53,7 @@
 #include "fl/stl/shared_ptr.h"
 #include "fl/stl/weak_ptr.h"
 #include "fl/stl/new.h"
-#include "fl/cled_controller.h"
+#include "fl/channels/cled_controller.h"
 
 FL_TEST_FILE(FL_FILEPATH) {
 
@@ -203,7 +203,6 @@ FL_TEST_CASE("Channel API: Mock driver workflow (GitHub issue #2167)") {
 
     auto timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
     fl::ChannelOptions options;
-    options.mAffinity = "MOCK";  // Bind to mock driver
 
     fl::ChannelConfig config(5, timing, fl::span<CRGB>(leds, 10), GRB, options);
 
@@ -257,7 +256,6 @@ FL_TEST_CASE("Channel API: Double add protection") {
 
     auto timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
     fl::ChannelOptions options;
-    options.mAffinity = "MOCK_DOUBLE";
 
     fl::ChannelConfig config(10, timing, fl::span<CRGB>(leds, 5), GRB, options);
     auto channel = fl::Channel::create(config);
@@ -310,7 +308,6 @@ FL_TEST_CASE("Channel API: Add and remove symmetry") {
 
     auto timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
     fl::ChannelOptions options;
-    options.mAffinity = "MOCK_REMOVE";
 
     fl::ChannelConfig config(12, timing, fl::span<CRGB>(leds, 8), GRB, options);
     auto channel = fl::Channel::create(config);
@@ -363,7 +360,6 @@ FL_TEST_CASE("Channel API: Internal ChannelPtr storage prevents dangling") {
 
     auto timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
     fl::ChannelOptions options;
-    options.mAffinity = "MOCK_STORAGE";
 
     fl::ChannelConfig config(7, timing, fl::span<CRGB>(leds, 4), GRB, options);
     auto channel = fl::Channel::create(config);
@@ -415,12 +411,19 @@ FL_TEST_CASE("Channel API: Internal ChannelPtr storage prevents dangling") {
     manager.setDriverEnabled("MOCK_STORAGE", false);
 }
 
-FL_TEST_CASE("Legacy API: 4 parallel strips using FastLED.addLeds<>()") {
-    // This test validates that the legacy FastLED.addLeds<>() API works with channel drivers:
-    // - Use template-based FastLED.addLeds<WS2812, PIN>() (no explicit channel creation)
-    // - Set different colors on each strip
-    // - Call FastLED.show()
-    // - Verify driver received all 4 strips with correct data
+FL_TEST_CASE("Channel API: 4 parallel strips via FastLED.add() routes through mock driver") {
+    // Post-#2428 architecture: legacy `FastLED.addLeds<>()` pre-binds to the
+    // platform-default driver (Phase 5b) and bypasses `ChannelManager`, so the
+    // way to route runtime traffic through a custom mock driver is the
+    // explicit Channel API: `FastLED.add(cfg)`. Each `Channel` registered via
+    // that path consults the manager on every show() and picks the highest-
+    // priority driver that `canHandle` the channel data.
+    //
+    // This test validates that workflow with 4 parallel strips:
+    // - Register a mock driver with the manager at high priority
+    // - Create 4 channels via `FastLED.add(ChannelConfig)`
+    // - Call `FastLED.show()`
+    // - Verify the mock received all 4 strips
 
     auto mockEngine = fl::make_shared<ChannelEngineMock>("MOCK_LEGACY");
     mockEngine->reset();
@@ -434,7 +437,6 @@ FL_TEST_CASE("Legacy API: 4 parallel strips using FastLED.addLeds<>()") {
     FL_REQUIRE(registeredEngine != nullptr);
     FL_CHECK(registeredEngine.get() == mockEngine.get());
 
-    // Create 4 LED strips using legacy template API (no affinity, no explicit channel)
     #define NUM_LEDS 60
     #define PIN1 16
     #define PIN2 17
@@ -446,41 +448,34 @@ FL_TEST_CASE("Legacy API: 4 parallel strips using FastLED.addLeds<>()") {
     static CRGB strip3[NUM_LEDS];
     static CRGB strip4[NUM_LEDS];
 
-    // Use legacy API - should automatically use highest priority driver (our mock)
-    FastLED.addLeds<WS2812, PIN1>(strip1, NUM_LEDS);
-    FastLED.addLeds<WS2812, PIN2>(strip2, NUM_LEDS);
-    FastLED.addLeds<WS2812, PIN3>(strip3, NUM_LEDS);
-    FastLED.addLeds<WS2812, PIN4>(strip4, NUM_LEDS);
+    // Channel API: 4 channels routed through the manager.
+    auto timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
+    auto ch1 = FastLED.add(fl::ChannelConfig(PIN1, timing, fl::span<CRGB>(strip1, NUM_LEDS), RGB));
+    auto ch2 = FastLED.add(fl::ChannelConfig(PIN2, timing, fl::span<CRGB>(strip2, NUM_LEDS), RGB));
+    auto ch3 = FastLED.add(fl::ChannelConfig(PIN3, timing, fl::span<CRGB>(strip3, NUM_LEDS), RGB));
+    auto ch4 = FastLED.add(fl::ChannelConfig(PIN4, timing, fl::span<CRGB>(strip4, NUM_LEDS), RGB));
 
-    // Set different colors on each strip (from README example)
     fl::fill_solid(strip1, NUM_LEDS, CRGB::Red);
     fl::fill_solid(strip2, NUM_LEDS, CRGB::Green);
     fl::fill_solid(strip3, NUM_LEDS, CRGB::Blue);
     fl::fill_solid(strip4, NUM_LEDS, CRGB::Yellow);
 
-    // Reset mock counters before show
     mockEngine->reset();
-
-    // Call FastLED.show() - should enqueue all 4 strips
     FastLED.show();
 
-    // Verify driver received all 4 strips
     FL_CHECK(mockEngine->mEnqueueCount == 4);
     FL_CHECK(mockEngine->mShowCount == 1);
     FL_CHECK(mockEngine->mEnqueuedChannels.size() == 0);  // Cleared by show()
 
-    // Verify the channels have the correct data (spot check first LED of each strip)
     FL_CHECK(strip1[0] == CRGB::Red);
     FL_CHECK(strip2[0] == CRGB::Green);
     FL_CHECK(strip3[0] == CRGB::Blue);
     FL_CHECK(strip4[0] == CRGB::Yellow);
 
-    // Verify all LEDs in strip1 are red
     for (int i = 0; i < NUM_LEDS; i++) {
         FL_CHECK(strip1[i] == CRGB::Red);
     }
 
-    // Test second frame with different pattern (rainbow effect from README)
     mockEngine->reset();
     static uint8_t hue = 0;
     for(int i = 0; i < NUM_LEDS; i++) {
@@ -489,15 +484,15 @@ FL_TEST_CASE("Legacy API: 4 parallel strips using FastLED.addLeds<>()") {
         strip3[i] = CHSV(hue + (i * 4) + 128, 255, 255);
         strip4[i] = CHSV(hue + (i * 4) + 192, 255, 255);
     }
-
     FastLED.show();
 
-    // Verify driver received all 4 strips again
     FL_CHECK(mockEngine->mEnqueueCount == 4);
     FL_CHECK(mockEngine->mShowCount == 1);
 
-    // Cleanup - clear all controllers (legacy API doesn't return handles)
-    FastLED.clear(true);  // Clear and deallocate
+    FastLED.remove(ch1);
+    FastLED.remove(ch2);
+    FastLED.remove(ch3);
+    FastLED.remove(ch4);
     manager.removeDriver(mockEngine);
 
     #undef NUM_LEDS
@@ -529,7 +524,6 @@ public:
 static ChannelPtr makeChannel(CRGB* leds, int n) {
     auto timing = makeTimingConfig<TIMING_WS2812_800KHZ>();
     ChannelOptions opts;
-    opts.mAffinity = "STUB_ADD_REMOVE";
     ChannelConfig config(1, timing, fl::span<CRGB>(leds, n), RGB, opts);
     return Channel::create(config);
 }
@@ -974,7 +968,7 @@ struct EventTracker {
     int mConfiguredCount = 0;
     int mEnqueuedCount = 0;
     fl::string mLastEngineName;
-    const Channel* mLastChannel = nullptr;
+    const IChannel* mLastChannel = nullptr;
 
     void reset() {
         mCreatedCount = 0;
@@ -987,32 +981,32 @@ struct EventTracker {
         mLastChannel = nullptr;
     }
 
-    void onCreated(const Channel& ch) {
+    void onCreated(const IChannel& ch) {
         mCreatedCount++;
         mLastChannel = &ch;
     }
 
-    void onBeginDestroy(const Channel& ch) {
+    void onBeginDestroy(const IChannel& ch) {
         mBeginDestroyCount++;
         mLastChannel = &ch;
     }
 
-    void onAdded(const Channel& ch) {
+    void onAdded(const IChannel& ch) {
         mAddedCount++;
         mLastChannel = &ch;
     }
 
-    void onRemoved(const Channel& ch) {
+    void onRemoved(const IChannel& ch) {
         mRemovedCount++;
         mLastChannel = &ch;
     }
 
-    void onConfigured(const Channel& ch, const ChannelConfig&) {
+    void onConfigured(const IChannel& ch, const ChannelConfig&) {
         mConfiguredCount++;
         mLastChannel = &ch;
     }
 
-    void onEnqueued(const Channel& ch, const fl::string& engineName) {
+    void onEnqueued(const IChannel& ch, const fl::string& engineName) {
         mEnqueuedCount++;
         mLastChannel = &ch;
         mLastEngineName = engineName;
@@ -1037,7 +1031,7 @@ FL_TEST_CASE("Channel Events: onChannelCreated fires on Channel::create()") {
     auto& events = ChannelEvents::instance();
 
     // Add listener
-    int listenerId = events.onChannelCreated.add([&tracker](const Channel& ch) {
+    int listenerId = events.onChannelCreated.add([&tracker](const IChannel& ch) {
         tracker.onCreated(ch);
     });
 
@@ -1062,7 +1056,7 @@ FL_TEST_CASE("Channel Events: onChannelBeginDestroy fires on channel destruction
     auto& events = ChannelEvents::instance();
 
     // Add listener
-    int listenerId = events.onChannelBeginDestroy.add([&tracker](const Channel& ch) {
+    int listenerId = events.onChannelBeginDestroy.add([&tracker](const IChannel& ch) {
         tracker.onBeginDestroy(ch);
     });
 
@@ -1092,7 +1086,7 @@ FL_TEST_CASE("Channel Events: onChannelAdded fires on FastLED.add()") {
     mgr.addDriver(3000, driver);
 
     // Add listener
-    int listenerId = events.onChannelAdded.add([&tracker](const Channel& ch) {
+    int listenerId = events.onChannelAdded.add([&tracker](const IChannel& ch) {
         tracker.onAdded(ch);
     });
 
@@ -1100,7 +1094,6 @@ FL_TEST_CASE("Channel Events: onChannelAdded fires on FastLED.add()") {
     static CRGB leds[10];
     auto timing = makeTimingConfig<TIMING_WS2812_800KHZ>();
     ChannelOptions opts;
-    opts.mAffinity = "EVENT_TEST";
     ChannelConfig config(5, timing, fl::span<CRGB>(leds, 10), GRB, opts);
     auto channel = Channel::create(config);
 
@@ -1127,7 +1120,7 @@ FL_TEST_CASE("Channel Events: onChannelRemoved fires on FastLED.remove()") {
     mgr.addDriver(3001, driver);
 
     // Add listener
-    int listenerId = events.onChannelRemoved.add([&tracker](const Channel& ch) {
+    int listenerId = events.onChannelRemoved.add([&tracker](const IChannel& ch) {
         tracker.onRemoved(ch);
     });
 
@@ -1135,7 +1128,6 @@ FL_TEST_CASE("Channel Events: onChannelRemoved fires on FastLED.remove()") {
     static CRGB leds[10];
     auto timing = makeTimingConfig<TIMING_WS2812_800KHZ>();
     ChannelOptions opts;
-    opts.mAffinity = "EVENT_TEST";
     ChannelConfig config(5, timing, fl::span<CRGB>(leds, 10), GRB, opts);
     auto channel = Channel::create(config);
     FastLED.add(channel);
@@ -1159,7 +1151,7 @@ FL_TEST_CASE("Channel Events: onChannelConfigured fires on applyConfig()") {
     auto& events = ChannelEvents::instance();
 
     // Add listener
-    int listenerId = events.onChannelConfigured.add([&tracker](const Channel& ch, const ChannelConfig& cfg) {
+    int listenerId = events.onChannelConfigured.add([&tracker](const IChannel& ch, const ChannelConfig& cfg) {
         tracker.onConfigured(ch, cfg);
     });
 
@@ -1193,7 +1185,7 @@ FL_TEST_CASE("Channel Events: onChannelEnqueued fires when data is enqueued to d
     mgr.addDriver(3003, mockEngine);
 
     // Add listener
-    int listenerId = events.onChannelEnqueued.add([&tracker](const Channel& ch, const fl::string& engineName) {
+    int listenerId = events.onChannelEnqueued.add([&tracker](const IChannel& ch, const fl::string& engineName) {
         tracker.onEnqueued(ch, engineName);
     });
 
@@ -1202,7 +1194,6 @@ FL_TEST_CASE("Channel Events: onChannelEnqueued fires when data is enqueued to d
     fl::fill_solid(leds, 10, CRGB::Green);
     auto timing = makeTimingConfig<TIMING_WS2812_800KHZ>();
     ChannelOptions opts;
-    opts.mAffinity = "EVENT_ENQUEUE_TEST";
     ChannelConfig config(5, timing, fl::span<CRGB>(leds, 10), GRB, opts);
     auto channel = Channel::create(config);
     FastLED.add(channel);
@@ -1229,15 +1220,15 @@ FL_TEST_CASE("Channel Events: Multiple listeners with priority ordering") {
     fl::vector<int> callOrder;
 
     // Add listeners with different priorities (higher priority = called first)
-    int id1 = events.onChannelCreated.add([&callOrder](const Channel&) {
+    int id1 = events.onChannelCreated.add([&callOrder](const IChannel&) {
         callOrder.push_back(1);
     }, 10);  // Low priority
 
-    int id2 = events.onChannelCreated.add([&callOrder](const Channel&) {
+    int id2 = events.onChannelCreated.add([&callOrder](const IChannel&) {
         callOrder.push_back(2);
     }, 100);  // High priority
 
-    int id3 = events.onChannelCreated.add([&callOrder](const Channel&) {
+    int id3 = events.onChannelCreated.add([&callOrder](const IChannel&) {
         callOrder.push_back(3);
     }, 50);  // Medium priority
 
@@ -1268,22 +1259,22 @@ FL_TEST_CASE("Channel Events: Complete lifecycle event sequence") {
     mgr.addDriver(3004, mockEngine);
 
     // Add all listeners
-    int createdId = events.onChannelCreated.add([&tracker](const Channel& ch) {
+    int createdId = events.onChannelCreated.add([&tracker](const IChannel& ch) {
         tracker.onCreated(ch);
     });
-    int addedId = events.onChannelAdded.add([&tracker](const Channel& ch) {
+    int addedId = events.onChannelAdded.add([&tracker](const IChannel& ch) {
         tracker.onAdded(ch);
     });
-    int configuredId = events.onChannelConfigured.add([&tracker](const Channel& ch, const ChannelConfig& cfg) {
+    int configuredId = events.onChannelConfigured.add([&tracker](const IChannel& ch, const ChannelConfig& cfg) {
         tracker.onConfigured(ch, cfg);
     });
-    int enqueuedId = events.onChannelEnqueued.add([&tracker](const Channel& ch, const fl::string& engineName) {
+    int enqueuedId = events.onChannelEnqueued.add([&tracker](const IChannel& ch, const fl::string& engineName) {
         tracker.onEnqueued(ch, engineName);
     });
-    int removedId = events.onChannelRemoved.add([&tracker](const Channel& ch) {
+    int removedId = events.onChannelRemoved.add([&tracker](const IChannel& ch) {
         tracker.onRemoved(ch);
     });
-    int destroyId = events.onChannelBeginDestroy.add([&tracker](const Channel& ch) {
+    int destroyId = events.onChannelBeginDestroy.add([&tracker](const IChannel& ch) {
         tracker.onBeginDestroy(ch);
     });
 
@@ -1296,7 +1287,6 @@ FL_TEST_CASE("Channel Events: Complete lifecycle event sequence") {
         fl::fill_solid(leds1, 10, CRGB::Red);
         auto timing = makeTimingConfig<TIMING_WS2812_800KHZ>();
         ChannelOptions opts;
-        opts.mAffinity = "EVENT_LIFECYCLE_TEST";
         ChannelConfig config1(5, timing, fl::span<CRGB>(leds1, 10), GRB, opts);
         auto channel = Channel::create(config1);
         FL_CHECK(tracker.mCreatedCount == 1);
@@ -1654,8 +1644,13 @@ FL_TEST_CASE("Arduino macro undefs: Comprehensive round-trip test") {
     }
 }
 
-FL_TEST_CASE("Channel API: Affinity binds to low priority driver, empty affinity binds to high priority") {
-    // Create two mock drivers with different priorities
+FL_TEST_CASE("Channel API: Empty affinity binds to high priority driver") {
+    // Create two mock drivers with different priorities. The pre-#2459 version
+    // of this test also covered "mAffinity = LOW_PRIORITY pins to the lower-
+    // priority driver", but with `mAffinity` removed the only way to override
+    // priority dispatch is `setExclusiveDriver`, which leaves persistent state
+    // that pollutes downstream tests. The priority-dispatch half of the
+    // original test is preserved here verbatim.
     auto lowPriorityEngine = fl::make_shared<ChannelEngineMock>("LOW_PRIORITY");
     auto highPriorityEngine = fl::make_shared<ChannelEngineMock>("HIGH_PRIORITY");
     lowPriorityEngine->reset();
@@ -1672,44 +1667,14 @@ FL_TEST_CASE("Channel API: Affinity binds to low priority driver, empty affinity
     FL_REQUIRE(lowEngine != nullptr);
     FL_REQUIRE(highEngine != nullptr);
 
-    // Test 1: Channel WITH affinity="LOW_PRIORITY" should bind to low priority driver
-    {
-        static CRGB leds1[10];
-        fl::fill_solid(leds1, 10, CRGB::Red);
-
-        auto timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
-        fl::ChannelOptions opts;
-        opts.mAffinity = "LOW_PRIORITY";  // Explicit affinity to low priority
-
-        fl::ChannelConfig config(5, timing, fl::span<CRGB>(leds1, 10), GRB, opts);
-        auto channel1 = fl::Channel::create(config);
-        FL_REQUIRE(channel1 != nullptr);
-
-        // Add to FastLED and trigger show
-        FastLED.add(channel1);
-
-        // Reset counters before show
-        lowPriorityEngine->reset();
-        highPriorityEngine->reset();
-
-        FastLED.show();
-
-        // Verify: LOW priority driver should receive data (affinity binding)
-        FL_CHECK(lowPriorityEngine->mEnqueueCount == 1);
-        FL_CHECK(highPriorityEngine->mEnqueueCount == 0);  // Should NOT receive data
-
-        // Cleanup
-        FastLED.remove(channel1);
-    }
-
-    // Test 2: Channel WITHOUT affinity should bind to high priority driver
+    // Channel WITHOUT affinity should bind to high priority driver
     {
         static CRGB leds2[10];
         fl::fill_solid(leds2, 10, CRGB::Green);
 
         auto timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
         fl::ChannelOptions opts;
-        // No affinity set (empty string)
+        // No affinity set
 
         fl::ChannelConfig config(6, timing, fl::span<CRGB>(leds2, 10), GRB, opts);
         auto channel2 = fl::Channel::create(config);
@@ -1835,7 +1800,6 @@ FL_TEST_CASE("Channel API: removeFromDrawList() clears driver weak_ptr") {
 
     auto timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
     fl::ChannelOptions opts;
-    opts.mAffinity = "CLEAR_TEST";  // Set affinity to bind to driver
 
     fl::ChannelConfig config(5, timing, fl::span<CRGB>(leds, 10), GRB, opts);
     auto channel = fl::Channel::create(config);
@@ -1879,7 +1843,6 @@ FL_TEST_CASE("Channel API: Late binding - driver name empty after construction")
 
         auto timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
         fl::ChannelOptions opts;
-        opts.mAffinity = "LATE_BIND_AFFINITY";
 
         fl::ChannelConfig config(5, timing, fl::span<CRGB>(leds1, 10), GRB, opts);
         auto channel = fl::Channel::create(config);

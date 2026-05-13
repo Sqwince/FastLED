@@ -8,6 +8,7 @@
 #include "fl/stl/variant.h"
 #include "fl/math/screenmap.h"
 #include "fl/chipsets/chipset_timing_config.h"
+#include "fl/chipsets/clockless_encoder.h"
 #include "fl/chipsets/spi.h"
 #include "fl/gfx/eorder.h"
 #include "fl/channels/options.h"
@@ -22,16 +23,28 @@ namespace fl {
 ///
 /// Used for timing-sensitive LED protocols like WS2812, SK6812, APA106, etc.
 /// These chipsets encode data using precise nanosecond timing on a single data line.
+///
+/// Carries three concerns as peer fields:
+///   - `pin`     — GPIO data pin
+///   - `timing`  — bit-period timing (T1/T2/T3/RESET)
+///   - `encoder` — byte-level encoding pipeline (WS2812 vs UCS7604 variants)
 struct ClocklessChipset {
     int pin;                        ///< GPIO data pin
     ChipsetTimingConfig timing;     ///< T1/T2/T3 timing parameters
+    ClocklessEncoder encoder;       ///< Byte-level encoding pipeline (default: WS2812)
 
-    /// @brief Constructor
-    ClocklessChipset(int pin, const ChipsetTimingConfig& timing) FL_NOEXCEPT
-        : pin(pin), timing(timing) {}
+    /// @brief Constructor with explicit encoder
+    constexpr ClocklessChipset(int pin, const ChipsetTimingConfig& timing,
+                               ClocklessEncoder encoder) FL_NOEXCEPT
+        : pin(pin), timing(timing), encoder(encoder) {}
+
+    /// @brief Constructor (encoder defaults to WS2812)
+    constexpr ClocklessChipset(int pin, const ChipsetTimingConfig& timing) FL_NOEXCEPT
+        : pin(pin), timing(timing), encoder(ClocklessEncoder::CLOCKLESS_ENCODER_WS2812) {}
 
     /// @brief Default constructor
-    ClocklessChipset() FL_NOEXCEPT : pin(-1), timing(0, 0, 0, 0) {}
+    constexpr ClocklessChipset() FL_NOEXCEPT
+        : pin(-1), timing(0, 0, 0, 0), encoder(ClocklessEncoder::CLOCKLESS_ENCODER_WS2812) {}
 
     /// @brief Copy constructor
     ClocklessChipset(const ClocklessChipset&) FL_NOEXCEPT = default;
@@ -48,10 +61,8 @@ struct ClocklessChipset {
     /// @brief Equality operator
     bool operator==(const ClocklessChipset& other) const FL_NOEXCEPT {
         return pin == other.pin &&
-               timing.t1_ns == other.timing.t1_ns &&
-               timing.t2_ns == other.timing.t2_ns &&
-               timing.t3_ns == other.timing.t3_ns &&
-               timing.reset_us == other.timing.reset_us;
+               timing == other.timing &&
+               encoder == other.encoder;
     }
 
     /// @brief Inequality operator
@@ -59,6 +70,29 @@ struct ClocklessChipset {
         return !(*this == other);
     }
 };
+
+/// @brief Build a `ClocklessChipset` from a compile-time TIMING trait
+///
+/// Collapses the historical two-step pattern:
+/// ```cpp
+/// auto timing = fl::makeTimingConfig<fl::TIMING_WS2812_800KHZ>();
+/// fl::ClocklessChipset chipset(PIN, timing);
+/// ```
+/// into a single expression:
+/// ```cpp
+/// auto chipset = fl::makeClockless<fl::TIMING_WS2812_800KHZ>(PIN);
+/// ```
+///
+/// The encoder selector is extracted from the TIMING trait via `encoder_for<>()`:
+/// timings with a static `ENCODER` member (e.g., `TIMING_UCS7604_800KHZ`) yield
+/// that encoder; others default to `CLOCKLESS_ENCODER_WS2812`.
+///
+/// @tparam TIMING Compile-time chipset timing trait (e.g., `TIMING_WS2812_800KHZ`)
+/// @param  pin    GPIO data pin
+template <typename TIMING>
+constexpr ClocklessChipset makeClockless(int pin) FL_NOEXCEPT {
+    return ClocklessChipset(pin, makeTimingConfig<TIMING>(), encoder_for<TIMING>());
+}
 
 /// @brief SPI chipset configuration (data + clock pins)
 ///
@@ -170,7 +204,7 @@ struct ChannelConfig {
     template<typename TIMING>
     ChannelConfig(int pin, fl::span<CRGB> leds, EOrder rgbOrder = RGB,
                   const ChannelOptions& options = ChannelOptions())
- FL_NOEXCEPT : ChannelConfig(ClocklessChipset(pin, makeTimingConfig<TIMING>()), leds, rgbOrder, options) {}
+ FL_NOEXCEPT : ChannelConfig(makeClockless<TIMING>(pin), leds, rgbOrder, options) {}
 
     /// @brief Basic constructor with timing (backwards compatibility)
     /// @deprecated Use ClocklessChipset constructor instead
@@ -245,6 +279,76 @@ struct ChannelConfig {
 };
 
 FASTLED_SHARED_PTR_STRUCT(ChannelConfig);
+
+/// @brief Strongly-typed channel configuration with compile-time chipset family.
+///
+/// `ChannelConfigOf<Chipset>` is the Phase 3b (issue #2428) templated form of
+/// `ChannelConfig`. It carries the same payload as a `ChannelConfig` but encodes
+/// the chipset family (`ClocklessChipset` or `SpiChipsetConfig`) as a template
+/// parameter so that `FastLED.add<Bus, Chipset>(cfg)` can:
+///
+///  - Deduce `Chipset` from the configuration without a runtime variant probe.
+///  - `static_assert` that the named `Bus` supports `Chipset` at compile time
+///    via `BusSupports<B, Chipset>`.
+///  - Reject nonsense combinations (e.g. clockless config routed to an
+///    SPI-only bus) at compile time rather than at runtime.
+///
+/// Implicit conversions to/from the non-template `ChannelConfig` preserve
+/// backward compatibility -- existing `Channel::create(cfg)` callers and the
+/// non-template `FastLED.add(cfg)` overloads continue to work unchanged.
+///
+/// @tparam Chipset One of `fl::ClocklessChipset` or `fl::SpiChipsetConfig`.
+template<typename Chipset>
+struct ChannelConfigOf {
+    /// @brief Construct from a typed chipset, LEDs span, and optional metadata.
+    ChannelConfigOf(const Chipset& chipset, fl::span<CRGB> leds,
+                    EOrder rgbOrder = RGB,
+                    const ChannelOptions& options = ChannelOptions()) FL_NOEXCEPT
+        : chipset(chipset), mLeds(leds), rgb_order(rgbOrder), options(options) {}
+
+    /// @brief Named-channel constructor.
+    ChannelConfigOf(const fl::string& name, const Chipset& chipset,
+                    fl::span<CRGB> leds, EOrder rgbOrder = RGB,
+                    const ChannelOptions& options = ChannelOptions()) FL_NOEXCEPT
+        : chipset(chipset), mLeds(leds), rgb_order(rgbOrder), options(options), mName(name) {}
+
+    /// @brief Implicit conversion to the type-erased `ChannelConfig` so the
+    ///        existing non-template `Channel::create()` factory accepts a
+    ///        templated config without any per-call-site change.
+    operator ChannelConfig() const FL_NOEXCEPT {
+        ChannelConfig cfg(chipset, mLeds, rgb_order, options);
+        cfg.mScreenMap = mScreenMap;
+        if (mName.has_value()) {
+            cfg.mName = mName;
+        }
+        return cfg;
+    }
+
+    /// @brief Convenience: build the erased form by value (handy in templates
+    ///        where the implicit conversion is suppressed by overload rules).
+    ChannelConfig toErased() const FL_NOEXCEPT { return static_cast<ChannelConfig>(*this); }
+
+    // ---- Data members (mirror ChannelConfig, but with typed `chipset`) ----
+
+    /// Typed chipset configuration. No variant -- the `Chipset` template
+    /// parameter is the source of truth.
+    Chipset chipset;
+
+    /// LED data span.
+    fl::span<CRGB> mLeds;
+
+    /// RGB channel ordering.
+    EOrder rgb_order = RGB;
+
+    /// Optional channel settings (correction, temperature, dither, rgbw, affinity).
+    ChannelOptions options;
+
+    /// Screen mapping (for JS canvas visualization).
+    fl::ScreenMap mScreenMap;
+
+    /// Optional user-specified name. If unset, `Channel` auto-generates one.
+    fl::optional<fl::string> mName;
+};
 
 /// @brief Multi-channel LED configuration
 ///
