@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, cast
 
 from running_process import RunningProcess
+from typeguard import typechecked
 
 from ci.meson.cache_utils import get_max_dir_mtime
 from ci.meson.compiler import (
@@ -49,6 +50,55 @@ class FastNativeEntries:
     ar: Optional[str]
 
 
+@typechecked
+@dataclass(slots=True)
+class EmccNativeLaunchers:
+    """Compiled emscripten-tool launcher paths produced by ``compile_native()``.
+
+    Every field is a guaranteed-present absolute path. ``compile_native()``
+    in clang-tool-chain 1.5.1+ produces all seven launchers in one call;
+    if any is missing afterward the resolver raises rather than silently
+    falling back. clang-tool-chain >=1.5.1 is pinned in pyproject.toml.
+    """
+
+    emcc: str
+    empp: str
+    emar: str
+    emstrip: str
+    emranlib: str
+    emnm: str
+    wasm_ld: str
+
+
+@typechecked
+@dataclass(slots=True)
+class WasmNativeEntries:
+    """Native tool entries for the WASM cross-file.
+
+    All fields are absolute paths to compiled ctc-* native launchers.
+    No Python-wrapper fallbacks — clang-tool-chain >=1.5.1 is a hard
+    requirement and ``compile_native()`` is invoked eagerly.
+
+    ``wasm_ld`` is not consumed by meson directly. emcc invokes wasm-ld
+    internally; the integration is via the ``EMCC_WASM_LD`` env var picked
+    up by the shared.py patch that ``ensure_emscripten_available`` applies.
+    Carried here so the build orchestration can set the env var.
+    """
+
+    c: str
+    cpp: str
+    ar: str
+    strip: str
+    ranlib: str
+    nm: str
+    wasm_ld: str
+
+
+def _native_launcher_output_dir(project_root: Path) -> Path:
+    """Directory where compiled native launchers live."""
+    return project_root / ".cached" / "clang-native"
+
+
 def _ensure_native_launcher(project_root: Path) -> tuple[Optional[str], Optional[str]]:
     """
     Ensure ctc-clang/ctc-clang++ native launchers are compiled.
@@ -61,7 +111,7 @@ def _ensure_native_launcher(project_root: Path) -> tuple[Optional[str], Optional
     Returns:
         Tuple of (ctc_clang_path, ctc_clangpp_path), or (None, None) on failure.
     """
-    output_dir = project_root / ".cached" / "clang-native"
+    output_dir = _native_launcher_output_dir(project_root)
     exe_suffix = ".exe" if sys.platform == "win32" else ""
     ctc_clang = output_dir / f"ctc-clang{exe_suffix}"
     ctc_clangpp = output_dir / f"ctc-clang++{exe_suffix}"
@@ -81,6 +131,77 @@ def _ensure_native_launcher(project_root: Path) -> tuple[Optional[str], Optional
     except Exception:
         pass
     return None, None
+
+
+def _ensure_emcc_native_launcher(project_root: Path) -> EmccNativeLaunchers:
+    """
+    Build and return all seven WASM-related ctc-* native launcher paths.
+
+    ``compile_native()`` from clang-tool-chain 1.5.1+ produces every binary
+    in a single invocation (clang + emcc + wasm-ld + emtool family with all
+    its hardlinked aliases). If any binary is missing afterward, raises
+    RuntimeError — no Python-wrapper fallback. clang-tool-chain >=1.5.1 is
+    pinned in pyproject.toml so this is a hard requirement.
+
+    Raises:
+        RuntimeError: if ``compile_native()`` fails or any launcher binary
+            is missing after a successful build.
+    """
+    output_dir = _native_launcher_output_dir(project_root)
+    exe_suffix = ".exe" if sys.platform == "win32" else ""
+    binaries = {
+        "emcc": output_dir / f"ctc-emcc{exe_suffix}",
+        "empp": output_dir / f"ctc-em++{exe_suffix}",
+        "emar": output_dir / f"ctc-emar{exe_suffix}",
+        "emstrip": output_dir / f"ctc-emstrip{exe_suffix}",
+        "emranlib": output_dir / f"ctc-emranlib{exe_suffix}",
+        "emnm": output_dir / f"ctc-emnm{exe_suffix}",
+        "wasm_ld": output_dir / f"ctc-wasm-ld{exe_suffix}",
+    }
+
+    if not all(p.exists() for p in binaries.values()):
+        from clang_tool_chain.commands.compile_native import compile_native
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        rc = compile_native(str(output_dir))
+        if rc != 0:
+            raise RuntimeError(
+                f"clang-tool-chain compile_native() failed with rc={rc} "
+                f"in {output_dir}; cannot resolve WASM native launchers"
+            )
+        missing = [name for name, p in binaries.items() if not p.exists()]
+        if missing:
+            raise RuntimeError(
+                f"clang-tool-chain compile_native() succeeded but expected "
+                f"binaries are missing in {output_dir}: {missing}. "
+                f"Ensure clang-tool-chain >=1.5.1 is installed."
+            )
+
+    return EmccNativeLaunchers(**{name: str(p) for name, p in binaries.items()})
+
+
+def resolve_wasm_native_entries(project_root: Path) -> WasmNativeEntries:
+    """
+    Resolve compiler/archiver entries for the Meson WASM cross-file.
+
+    Returns absolute paths to the seven compiled ctc-* native launchers.
+    No Python-wrapper fallback — if ``compile_native()`` fails or any
+    binary is missing, raises (clang-tool-chain >=1.5.1 is pinned and
+    guarantees all seven launchers).
+
+    Raises:
+        RuntimeError: if ``compile_native()`` fails or any binary is missing.
+    """
+    launchers = _ensure_emcc_native_launcher(project_root)
+    return WasmNativeEntries(
+        c=launchers.emcc,
+        cpp=launchers.empp,
+        ar=launchers.emar,
+        strip=launchers.emstrip,
+        ranlib=launchers.emranlib,
+        nm=launchers.emnm,
+        wasm_ld=launchers.wasm_ld,
+    )
 
 
 def _find_zccache_binary() -> Optional[str]:
@@ -395,6 +516,47 @@ def normalize_meson_private_include_paths(build_dir: Path) -> bool:
                     ) from e
 
     return changed_any
+
+
+def cleanup_stale_meson_lockfile(build_dir: Path) -> bool:
+    """Remove a stale ``meson-private/meson.lock`` left by a killed meson process.
+
+    On Windows, meson <= 1.10.x crashed cryptically in ``DirectoryLock.__enter__``
+    when the underlying lockfile open() raised an OSError (e.g., from a stale
+    lockfile left by a killed/abandoned meson process). meson 1.11.0 fixed the
+    crash itself, but the underlying cause — a stale ``meson-private/meson.lock``
+    file — still produces an avoidable setup failure on Windows. Deleting the
+    stale lockfile before invoking ``meson setup`` avoids the failure entirely.
+
+    Args:
+        build_dir: The meson build directory (parent of ``meson-private``).
+
+    Returns:
+        True if a stale lockfile was found and successfully removed, False
+        otherwise (including when no lockfile exists or removal failed).
+    """
+    # Stale lockfile cleanup is intended for the Windows DirectoryLock bug.
+    # On POSIX, meson uses fcntl/flock (advisory) — removing an in-use lockfile
+    # could let a concurrent meson setup bypass the intended lock.
+    if os.name != "nt":
+        return False
+
+    lockfile = build_dir / "meson-private" / "meson.lock"
+    if not lockfile.exists():
+        return False
+    try:
+        lockfile.unlink()
+        _ts_print(f"[MESON] Removed stale lockfile: {lockfile}")
+        return True
+    except KeyboardInterrupt as ki:
+        handle_keyboard_interrupt(ki)
+        raise
+    except OSError as e:
+        # Be tolerant of file-in-use errors on Windows — if removal fails, log
+        # and continue. The caller will hit the original OSError from meson,
+        # which is now visible thanks to the 1.11.0 bump.
+        _ts_print(f"[MESON] Warning: Could not remove stale lockfile {lockfile}: {e}")
+        return False
 
 
 def _write_configuration_markers(
@@ -1947,6 +2109,10 @@ endian = 'little'
                     )
 
     try:
+        # Remove any stale meson lockfile left by a killed/abandoned meson
+        # process (Windows bug, see issue #2484). No-op if build_dir or
+        # meson-private/ doesn't exist yet.
+        cleanup_stale_meson_lockfile(build_dir)
         returncode, stdout = _run_meson_setup()
 
         # Self-healing: If meson setup fails with "does not exist" error,
@@ -1958,6 +2124,7 @@ endian = 'little'
             )
             _clear_stale_caches()
             _ts_print("[MESON] 🔄 Retrying meson setup...")
+            cleanup_stale_meson_lockfile(build_dir)
             returncode, stdout = _run_meson_setup()
 
         if returncode != 0:

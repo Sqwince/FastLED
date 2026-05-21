@@ -76,6 +76,14 @@ def _normalize_meson_private_paths(build_dir: Path) -> None:
         print("[WASM] Normalized private include paths for strict path mode")
 
 
+def _cleanup_stale_meson_lockfile(build_dir: Path) -> None:
+    """Remove stale meson-private/meson.lock before meson setup (see issue #2484)."""
+    from ci.meson.build_config import cleanup_stale_meson_lockfile
+
+    # Helper logs its own status message; we just call through.
+    cleanup_stale_meson_lockfile(build_dir)
+
+
 # ============================================================================
 # Library fingerprint — skip meson/ninja when source tree hasn't changed
 # ============================================================================
@@ -403,15 +411,18 @@ def _recover_stale_wasm_build(build_dir: Path) -> bool:
         print("[WASM] Forcing Meson reconfiguration...")
         # Extract mode from build dir name (e.g., "meson-wasm-quick" -> "quick")
         mode = build_dir.name.replace("meson-wasm-", "")
+        generated_cross = _render_wasm_cross_file(build_dir)
         cmd = [
             get_meson_executable(),
             "setup",
             "--reconfigure",
             "--cross-file",
-            str(CROSS_FILE),
+            str(generated_cross),
             str(build_dir),
             f"-Dbuild_mode={mode}",
         ]
+        # Remove any stale meson lockfile before reconfigure (see issue #2484).
+        _cleanup_stale_meson_lockfile(build_dir)
         result = subprocess.run(cmd, cwd=PROJECT_ROOT)
         if result.returncode == 0:
             _normalize_meson_private_paths(build_dir)
@@ -424,6 +435,152 @@ def _recover_stale_wasm_build(build_dir: Path) -> bool:
     except Exception as e:
         print(f"[WASM] Self-healing failed: {e}")
         return False
+
+
+# ============================================================================
+# Cross-file generation
+# ============================================================================
+
+
+# Static sections (everything other than [binaries]) are kept in the
+# checked-in template; only the [binaries] section is generated based on
+# whether the native ctc-emcc launcher could be resolved.
+_GENERATED_CROSS_FILE_NAME = "wasm_cross_file.generated.ini"
+
+
+def _escape_meson_string(value: str) -> str:
+    """Escape a string for safe insertion into a Meson .ini value.
+
+    Meson INI uses single-quoted strings; backslashes need doubling and
+    single quotes need escaping. Windows absolute paths are the common case.
+    """
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+_emscripten_patch_applied = False
+
+
+def _ensure_emscripten_wasm_ld_patch() -> None:
+    """Apply the EMCC_WASM_LD patch to the emscripten install.
+
+    Idempotent — does nothing if the patch is already in place. Required
+    so that ``shared.py`` honors the ``EMCC_WASM_LD`` env var we set below,
+    routing emcc's internal wasm-ld invocation through our ctc-wasm-ld
+    native launcher. Added in clang-tool-chain 1.5.1 (closes #22).
+    """
+    global _emscripten_patch_applied
+    if _emscripten_patch_applied:
+        return
+    try:
+        import platform as _platform_mod
+
+        from clang_tool_chain.installers.emscripten import ensure_emscripten_available
+
+        system = _platform_mod.system().lower()
+        platform_name = (
+            "win"
+            if system == "windows"
+            else ("darwin" if system == "darwin" else "linux")
+        )
+        machine = _platform_mod.machine().lower()
+        arch = "x86_64" if machine in ("x86_64", "amd64") else "arm64"
+        ensure_emscripten_available(platform_name, arch)
+        _emscripten_patch_applied = True
+    except Exception as e:
+        # Patch is best-effort. Without it, EMCC_WASM_LD is ignored and emcc
+        # falls back to the bundled wasm-ld — the build still works, just
+        # without the ctc-wasm-ld speedup on link.
+        print(f"[WASM] EMCC_WASM_LD patch attempt failed (non-fatal): {e}")
+
+
+def _render_wasm_cross_file(build_dir: Path) -> Path:
+    """Generate the WASM Meson cross-file with resolved compiler paths.
+
+    clang-tool-chain >=1.5.1 is pinned and guarantees all seven native
+    launchers; if resolution fails the function raises (no Python-wrapper
+    fallback).
+
+    Side effects: applies the EMCC_WASM_LD patch to the emscripten install
+    (idempotent, once per process) and sets ``EMCC_WASM_LD`` in os.environ
+    pointing at the resolved ctc-wasm-ld so emcc's internal linker
+    invocation goes through it.
+    """
+    from ci.meson.build_config import resolve_wasm_native_entries
+
+    _ensure_emscripten_wasm_ld_patch()
+    entries = resolve_wasm_native_entries(PROJECT_ROOT)
+    os.environ["EMCC_WASM_LD"] = entries.wasm_ld
+
+    print(f"[WASM] Using native ctc-emcc launcher: {entries.c}")
+    for label, path in (
+        ("emar", entries.ar),
+        ("emstrip", entries.strip),
+        ("emranlib", entries.ranlib),
+        ("emnm", entries.nm),
+        ("wasm-ld", entries.wasm_ld),
+    ):
+        print(f"[WASM] Using native ctc-{label} launcher: {path}")
+
+    c_val = _escape_meson_string(entries.c)
+    cpp_val = _escape_meson_string(entries.cpp)
+    ar_val = _escape_meson_string(entries.ar)
+    strip_val = _escape_meson_string(entries.strip)
+    ranlib_val = _escape_meson_string(entries.ranlib)
+    nm_val = _escape_meson_string(entries.nm)
+
+    content = (
+        "# ============================================================================\n"
+        "# Meson Cross-Compilation File for Emscripten (WASM) [AUTO-GENERATED]\n"
+        "# ============================================================================\n"
+        "# Auto-generated by ci/wasm_build.py:_render_wasm_cross_file().\n"
+        "# DO NOT EDIT — edit ci/meson/wasm_cross_file.ini (static template)\n"
+        "# and the generator instead.\n"
+        "#\n"
+        "# The [binaries] section is dynamically resolved so we can point\n"
+        "# meson at compiled ctc-* native launchers (near-zero startup) when\n"
+        "# available, with automatic fallback to the clang-tool-chain Python\n"
+        "# wrappers otherwise.\n"
+        "# ============================================================================\n"
+        "\n"
+        "[binaries]\n"
+        f"c = '{c_val}'\n"
+        f"cpp = '{cpp_val}'\n"
+        f"ar = '{ar_val}'\n"
+        f"strip = '{strip_val}'\n"
+        f"ranlib = '{ranlib_val}'\n"
+        f"nm = '{nm_val}'\n"
+        "# wasm-ld is invoked by emcc internally; integration is via the\n"
+        "# EMCC_WASM_LD env var set in ensure_meson_configured() and honored\n"
+        "# by the shared.py patch applied by ensure_emscripten_available().\n"
+        "\n"
+        "[host_machine]\n"
+        "system = 'emscripten'\n"
+        "cpu_family = 'wasm32'\n"
+        "cpu = 'wasm32'\n"
+        "endian = 'little'\n"
+        "\n"
+        "[properties]\n"
+        "# Skip meson's compiler sanity check — emcc sometimes fails the default\n"
+        "# test program due to missing emscripten runtime stubs at configure time.\n"
+        "# The actual compilation validates the toolchain during build.\n"
+        "skip_sanity_check = true\n"
+        "\n"
+        "# Emscripten executables need a JS runtime to run\n"
+        "needs_exe_wrapper = true\n"
+    )
+
+    build_dir.mkdir(parents=True, exist_ok=True)
+    generated = build_dir / _GENERATED_CROSS_FILE_NAME
+
+    # Only write if changed — meson will not see a meaningful change and
+    # avoid spurious reconfigures.
+    try:
+        existing = generated.read_text(encoding="utf-8")
+    except OSError:
+        existing = None
+    if existing != content:
+        generated.write_text(content, encoding="utf-8")
+    return generated
 
 
 # ============================================================================
@@ -449,6 +606,12 @@ def ensure_meson_configured(build_dir: Path, mode: str, force: bool = False) -> 
             except OSError:
                 pass
         if stored_hash == current_hash:
+            # Re-render the generated cross-file so a freshly built or
+            # repaired native launcher is picked up on the NEXT meson
+            # invocation. We don't trigger a reconfigure here — the render
+            # is cheap (writes a small ini), and the next `meson setup`
+            # will see the updated paths automatically.
+            _render_wasm_cross_file(build_dir)
             _normalize_meson_private_paths(build_dir)
             return True  # No file list changes, skip reconfigure
 
@@ -461,16 +624,19 @@ def ensure_meson_configured(build_dir: Path, mode: str, force: bool = False) -> 
                     cache_file.unlink()
                 except OSError:
                     pass
+        generated_cross = _render_wasm_cross_file(build_dir)
         cmd = [
             get_meson_executable(),
             "setup",
             "--reconfigure",
             "--cross-file",
-            str(CROSS_FILE),
+            str(generated_cross),
             str(build_dir),
             f"-Dbuild_mode={mode}",
         ]
         print(f"[WASM] Reconfiguring meson (mode: {mode})...")
+        # Remove any stale meson lockfile before reconfigure (see issue #2484).
+        _cleanup_stale_meson_lockfile(build_dir)
         result = subprocess.run(cmd, cwd=PROJECT_ROOT)
         if result.returncode != 0:
             print(f"[WASM] Meson reconfiguration failed (rc {result.returncode})")
@@ -484,12 +650,13 @@ def ensure_meson_configured(build_dir: Path, mode: str, force: bool = False) -> 
         return True
 
     build_dir.mkdir(parents=True, exist_ok=True)
+    generated_cross = _render_wasm_cross_file(build_dir)
 
     cmd = [
         get_meson_executable(),
         "setup",
         "--cross-file",
-        str(CROSS_FILE),
+        str(generated_cross),
         str(build_dir),
         f"-Dbuild_mode={mode}",
     ]
@@ -499,6 +666,8 @@ def ensure_meson_configured(build_dir: Path, mode: str, force: bool = False) -> 
         cmd.insert(2, "--reconfigure")
 
     print(f"[WASM] Configuring meson (mode: {mode})...")
+    # Remove any stale meson lockfile before setup (see issue #2484).
+    _cleanup_stale_meson_lockfile(build_dir)
     result = subprocess.run(cmd, cwd=PROJECT_ROOT)
     if result.returncode != 0:
         print(f"[WASM] Meson setup failed with return code {result.returncode}")
